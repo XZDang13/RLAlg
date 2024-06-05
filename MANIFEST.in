@@ -1,0 +1,5 @@
+include README.md
+recursive-include RLAlg *.py
+recursive-include RLAlg/alg *
+recursive-include RLAlg/buffer *
+recursive-include RLAlg/nn *

@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Tuple, Optional
 import numpy as np
 import torch
 import torch.nn as nn
@@ -51,7 +51,7 @@ class GuassianHead(nn.Module):
 
         self.apply(weight_init)
 
-    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
+    def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         mu = self.mu_layer(x)
         std = torch.exp(self.log_std)
         pi = Normal(mu, std)
@@ -77,7 +77,7 @@ class SquashedGaussianHead(nn.Module):
         self.apply(weight_init)
 
     def forward(self, x:torch.Tensor, deterministic:bool=False,
-                with_logprob:bool=True) -> tuple[torch.Tensor, torch.Tensor|None,
+                with_logprob:bool=True) -> Tuple[torch.Tensor, Optional[torch.Tensor],
                                                  torch.Tensor, torch.Tensor]:
         mu = self.mu_layer(x)
         log_std = self.log_std_layer(x)
@@ -111,7 +111,7 @@ class CategoricalHead(nn.Module):
 
         self.apply(weight_init)
 
-    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
+    def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
         log_porb = None

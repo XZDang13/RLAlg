@@ -1,9 +1,9 @@
+from typing import Dict
 from collections import namedtuple
-import random
 import numpy as np
 import torch
 
-BATCH = dict[str, torch.Tensor]
+BATCH = Dict[str, torch.Tensor]
 
 class ReplayBuffer:
     def __init__(self, max_size:int, batch_size:int) -> None:
