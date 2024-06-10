@@ -12,7 +12,7 @@ def set_seed_everywhere(seed):
 
 def weight_init(m):
     if isinstance(m, nn.Linear):
-        nn.init.orthogonal_(m.weight.data)
+        nn.init.kaiming_normal_(m.weight.data, mode='fan_out', nonlinearity='relu')
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
     elif isinstance(m, nn.Conv2d):
