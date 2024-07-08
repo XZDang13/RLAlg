@@ -16,7 +16,10 @@ class MLPLayer(nn.Module):
 
         self.activate_func = activate_func
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        weight_init(self.linear)
+        if self.norm:
+            self.norm.reset_parameters()
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.linear(x)
@@ -33,7 +36,10 @@ class DeterminicHead(nn.Module):
         self.max_action = max_action
         self.linear = nn.Linear(feature_dim, action_dim)
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        nn.init.uniform_(self.linear.weight, -3e-3, 3e-3)
+        if self.linear.bias is not None:
+            nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.linear(x)
@@ -49,7 +55,10 @@ class GuassianHead(nn.Module):
         log_std = -0.5 * np.ones(action_dim, dtype=np.float32)
         self.log_std = torch.nn.Parameter(torch.as_tensor(log_std))
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        nn.init.uniform_(self.linear.weight, -3e-3, 3e-3)
+        if self.linear.bias is not None:
+            nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         mu = self.mu_layer(x)
@@ -74,7 +83,10 @@ class SquashedGaussianHead(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        nn.init.uniform_(self.linear.weight, -3e-3, 3e-3)
+        if self.linear.bias is not None:
+            nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor, deterministic:bool=False,
                 with_logprob:bool=True) -> Tuple[torch.Tensor, Optional[torch.Tensor],
@@ -109,7 +121,10 @@ class CategoricalHead(nn.Module):
 
         self.logit_layer = nn.Linear(feature_dim, action_dim)
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        nn.init.uniform_(self.linear.weight, -3e-3, 3e-3)
+        if self.linear.bias is not None:
+            nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         logits = self.logit_layer(x)
@@ -126,7 +141,10 @@ class CriticHead(nn.Module):
 
         self.critic_layer = nn.Linear(feature_dim, 1)
 
-        self.apply(weight_init)
+    def reset_parameters(self):
+        nn.init.uniform_(self.linear.weight, -3e-3, 3e-3)
+        if self.linear.bias is not None:
+            nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         value = self.critic_layer(x)
