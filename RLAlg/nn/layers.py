@@ -32,6 +32,31 @@ class MLPLayer(nn.Module):
         
         return x
     
+class Conv2DLayer(nn.Module):
+    def __init__(self, in_channel:int, out_channel:int, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+        super(Conv2DLayer, self).__init__()
+        bias = not norm
+        self.conv2d = nn.Conv2d(in_channel, out_channel, bias)
+        self.norm = nn.InstanceNorm2d(out_channel) if norm else None
+
+        self.activate_func = activate_func
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        weight_init(self.conv2d)
+        if self.norm:
+            self.norm.reset_parameters()
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = self.conv2d(x)
+        if self.norm:
+            x = self.norm(x)
+
+        x = self.activate_func(x)
+        
+        return x
+    
 class DeterminicHead(nn.Module):
     def __init__(self, feature_dim:int, action_dim:int, max_action:float=1.0) -> None:
         super().__init__()

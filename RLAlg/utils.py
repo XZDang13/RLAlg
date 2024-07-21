@@ -17,6 +17,6 @@ def weight_init(m):
         if hasattr(m, 'bias') and m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.Conv2d):
-        nn.init.kaiming_normal_(m.weight.data, mode='fan_in', nonlinearity='leaky_relu')
+        nn.init.xavier_uniform_(m.weight)
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
