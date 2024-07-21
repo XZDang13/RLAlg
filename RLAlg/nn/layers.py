@@ -33,10 +33,11 @@ class MLPLayer(nn.Module):
         return x
     
 class Conv2DLayer(nn.Module):
-    def __init__(self, in_channel:int, out_channel:int, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+    def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
+                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv2DLayer, self).__init__()
         bias = not norm
-        self.conv2d = nn.Conv2d(in_channel, out_channel, bias)
+        self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
         self.norm = nn.InstanceNorm2d(out_channel) if norm else None
 
         self.activate_func = activate_func
