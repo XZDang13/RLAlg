@@ -28,7 +28,8 @@ class MLPLayer(nn.Module):
         if self.norm:
             x = self.norm(x)
 
-        x = self.activate_func(x)
+        if self.activate_func:
+            x = self.activate_func(x)
         
         return x
     
@@ -37,7 +38,7 @@ class Conv1DLayer(nn.Module):
                  padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv1DLayer, self).__init__()
         bias = not norm
-        self.conv2d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
+        self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
         self.norm = nn.InstanceNorm1d(out_channel) if norm else None
 
         self.activate_func = activate_func
@@ -45,16 +46,17 @@ class Conv1DLayer(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        weight_init(self.conv2d)
+        weight_init(self.conv1d)
         if self.norm:
             self.norm.reset_parameters()
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.conv2d(x)
+        x = self.conv1d(x)
         if self.norm:
             x = self.norm(x)
 
-        x = self.activate_func(x)
+        if self.activate_func:
+            x = self.activate_func(x)
         
         return x
     
@@ -80,7 +82,8 @@ class Conv2DLayer(nn.Module):
         if self.norm:
             x = self.norm(x)
 
-        x = self.activate_func(x)
+        if self.activate_func:
+            x = self.activate_func(x)
         
         return x
     
