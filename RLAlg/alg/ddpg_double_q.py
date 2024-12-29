@@ -6,9 +6,9 @@ NNMODEL = nn.Module
 
 class DDPGDoubleQ:
     @staticmethod
-    def compute_critic_loss(actor: NNMODEL,
-                            critic: NNMODEL,
-                            critic_target: NNMODEL,
+    def compute_critic_loss(actor_model: NNMODEL,
+                            critic_model: NNMODEL,
+                            critic_target_model: NNMODEL,
                             observation: torch.Tensor,
                             action: torch.Tensor,
                             reward: torch.Tensor,
@@ -18,26 +18,26 @@ class DDPGDoubleQ:
                             gamma: float = 0.99) -> torch.Tensor:
         
         with torch.no_grad():
-            dist = actor(next_observation, std)
+            dist = actor_model(next_observation, std)
             next_action = dist.sample(0.3)
-            next_qvalue_target_1, next_qvalue_target_2 = critic_target(next_observation, next_action)
+            next_qvalue_target_1, next_qvalue_target_2 = critic_target_model(next_observation, next_action)
             next_qvalue_target = torch.min(next_qvalue_target_1, next_qvalue_target_2)
             target = reward + gamma * (1 - done) * next_qvalue_target
 
-        qvalue_1, qvalue_2 = critic(observation, action)
+        qvalue_1, qvalue_2 = critic_model(observation, action)
         critic_loss = F.mse_loss(qvalue_1, target) + F.mse_loss(qvalue_2, target)
 
         return critic_loss
     
     @staticmethod
-    def compute_actor_loss(actor: NNMODEL,
-                           critic: NNMODEL,
+    def compute_actor_loss(actor_model: NNMODEL,
+                           critic_model: NNMODEL,
                            observation: torch.Tensor,
                            std: torch.Tensor,
                            regularization_weight:float=0) -> torch.Tensor:
-        dist = actor(observation, std)
+        dist = actor_model(observation, std)
         action = dist.sample(0.3)
-        q_value_1, q_value_2 = critic(observation, action)
+        q_value_1, q_value_2 = critic_model(observation, action)
         q_value = torch.min(q_value_1, q_value_2)
         actor_loss = -q_value.mean()
         actor_loss += dist.mean.pow(2).mean() * regularization_weight

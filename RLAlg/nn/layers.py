@@ -126,7 +126,7 @@ class GuassianHead(nn.Module):
         std = torch.exp(self.log_std)
         pi = Normal(mu, std)
         log_porb = None
-        if action:
+        if action is not None:
             log_porb = pi.log_prob(action).sum(axis=-1)
 
         return pi, log_porb
@@ -199,7 +199,7 @@ class CategoricalHead(nn.Module):
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
         log_porb = None
-        if action:
+        if action is not None:
             log_porb = pi.log_prob(action)
 
         return pi, log_porb

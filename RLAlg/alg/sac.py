@@ -6,13 +6,13 @@ NNMODEL = nn.Module
 
 class SAC:
     @staticmethod
-    def compute_actor_loss(actor: NNMODEL,
-                           critic: NNMODEL,
+    def compute_actor_loss(actor_model: NNMODEL,
+                           critic_model: NNMODEL,
                            observation: torch.Tensor,
                            alpha: float,
                            regularization_weight:float=0) -> torch.Tensor:
-        action, log_prob, mean, log_std = actor(observation)
-        q1, q2 = critic(observation, action)
+        action, log_prob, mean, log_std = actor_model(observation)
+        q1, q2 = critic_model(observation, action)
 
         q = torch.min(q1, q2)
         actor_loss = (alpha * log_prob - q).mean()
@@ -21,9 +21,9 @@ class SAC:
         return actor_loss
 
     @staticmethod
-    def compute_critic_loss(actor: NNMODEL,
-                            critic: NNMODEL,
-                            critic_target: NNMODEL,
+    def compute_critic_loss(actor_model: NNMODEL,
+                            critic_model: NNMODEL,
+                            critic_target_model: NNMODEL,
                             observation: torch.Tensor,
                             action: torch.Tensor,
                             reward: torch.Tensor,
@@ -32,11 +32,11 @@ class SAC:
                             alpha: float,
                             gamma: float) -> torch.Tensor:
 
-        q1, q2 = critic(observation, action)
+        q1, q2 = critic_model(observation, action)
 
         with torch.no_grad():
-            next_action, next_log_prob, _, _ = actor(next_observation)
-            q1_targ, q2_targ = critic_target(next_observation, next_action)
+            next_action, next_log_prob, _, _ = actor_model(next_observation)
+            q1_targ, q2_targ = critic_target_model(next_observation, next_action)
 
             q_targ = torch.min(q1_targ, q2_targ)
             backup = reward + gamma * (1 - done) * (q_targ - alpha * next_log_prob)
@@ -48,11 +48,11 @@ class SAC:
         return critic_loss
     
     @staticmethod
-    def compute_alpha_loss(actor: NNMODEL,
+    def compute_alpha_loss(actor_model: NNMODEL,
                            log_alpha: torch.Tensor,
                            observation: torch.Tensor,
                            target_entropy: float) -> torch.Tensor:
-        _, log_prob, _, _ = actor(observation)
+        _, log_prob, _, _ = actor_model(observation)
         alpha_loss = -(log_alpha.exp() * (log_prob + target_entropy).detach()).mean()
         return alpha_loss
 

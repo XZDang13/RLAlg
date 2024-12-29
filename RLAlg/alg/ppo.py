@@ -1,36 +1,49 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
 
 NNMODEL = nn.Module
 
 class PPO:
     @staticmethod
-    def compute_actor_loss(policy: NNMODEL,
-                           old_log_probs: torch.Tensor,
+    def compute_policy_loss(policy_model: NNMODEL,
+                           log_probs_hat: torch.Tensor,
                            observations: torch.Tensor,
                            actions: torch.Tensor,
                            advantages: torch.Tensor,
                            clip_ratio: float) -> torch.Tensor:
         
-        logits = policy(observations)
-        dist = Categorical(logits=logits)
-        new_log_probs = dist.log_prob(actions)
+        dist, log_probs = policy_model(observations, actions)
         
-        ratio = (new_log_probs - old_log_probs).exp()
+        ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
         
-        loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
         
-        return loss
+        return loss.mean(), dist.entropy().mean()
 
     @staticmethod
-    def compute_critic_loss(value_function: NNMODEL,
+    def compute_value_loss(value_model: NNMODEL,
                             observations: torch.Tensor,
                             returns: torch.Tensor) -> torch.Tensor:
         
-        value_estimates = value_function(observations).squeeze()
-        loss = F.mse_loss(value_estimates, returns)
+        values = value_model(observations)
+        loss = (values - returns) ** 2
         
-        return loss
+        return loss.mean()
+    
+    @staticmethod
+    def compute_clipped_value_loss(value_model: NNMODEL,
+                                   observations: torch.Tensor,
+                                   values_hat: torch.Tensor,
+                                   returns: torch.Tensor,
+                                   clip_ratio: float) -> torch.Tensor:
+        values = value_model(observations).squeeze()
+        loss_unclipped = (values - returns) ** 2
+
+        values_clipped = values_hat+ torch.clamp(values - values_hat, -clip_ratio, clip_ratio)
+        loss_clipped = (values_clipped - returns) ** 2
+
+        loss = torch.max(loss_unclipped, loss_clipped)
+
+        return loss.mean()
