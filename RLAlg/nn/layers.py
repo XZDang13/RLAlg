@@ -107,13 +107,12 @@ class DeterminicHead(nn.Module):
         return x
     
 class GuassianHead(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int) -> None:
+    def __init__(self, feature_dim:int, action_dim:int, max_action:float=1) -> None:
         super().__init__()
 
         self.mu_layer = nn.Linear(feature_dim, action_dim)
-        log_std = -0.5 * np.ones(action_dim, dtype=np.float32)
-        self.log_std = torch.nn.Parameter(torch.as_tensor(log_std))
-
+        self.log_std = torch.nn.Parameter(torch.zeros(action_dim))
+        self.max_action = max_action    
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -123,6 +122,7 @@ class GuassianHead(nn.Module):
 
     def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         mu = self.mu_layer(x)
+        mu = self.max_action * torch.tanh(mu)
         std = torch.exp(self.log_std)
         pi = Normal(mu, std)
         log_porb = None
