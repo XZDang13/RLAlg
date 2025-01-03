@@ -13,7 +13,7 @@ class PPO:
                            advantages: torch.Tensor,
                            clip_ratio: float) -> torch.Tensor:
         
-        dist, log_probs = policy_model(observations, actions)
+        dist, _, log_probs = policy_model(observations, actions)
         
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)

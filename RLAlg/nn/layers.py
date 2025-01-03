@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal, Categorical, Distribution
+from ..distribution import TruncatedNormal
 from ..utils import weight_init
 
 
@@ -124,12 +125,13 @@ class GuassianHead(nn.Module):
         mu = self.mu_layer(x)
         mu = self.max_action * torch.tanh(mu)
         std = torch.exp(self.log_std)
-        pi = Normal(mu, std)
-        log_porb = None
-        if action is not None:
-            log_porb = pi.log_prob(action).sum(axis=-1)
+        pi = TruncatedNormal(mu, std, -self.max_action, self.max_action)
+        if action is None:
+            action = pi.sample()
 
-        return pi, log_porb
+        log_prob = pi.log_prob(action).sum(axis=-1)
+        
+        return pi, action, log_prob
 
 class SquashedGaussianHead(nn.Module):
     def __init__(self, feature_dim:int, action_dim:int,
@@ -198,11 +200,12 @@ class CategoricalHead(nn.Module):
     def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
-        log_porb = None
-        if action is not None:
-            log_porb = pi.log_prob(action)
-
-        return pi, log_porb
+        
+        if action is None:
+            action = pi.sample()
+            log_prob = pi.log_prob(action)
+        
+        return pi, action, log_prob
     
 class CriticHead(nn.Module):
     def __init__(self, feature_dim:int) -> None:
