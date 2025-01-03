@@ -203,7 +203,8 @@ class CategoricalHead(nn.Module):
         
         if action is None:
             action = pi.sample()
-            log_prob = pi.log_prob(action)
+        
+        log_prob = pi.log_prob(action)
         
         return pi, action, log_prob
     
