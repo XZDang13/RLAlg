@@ -19,11 +19,11 @@ class PPO:
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
         
-        loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-        loss += dist.mean.pow(2) * regularization_weight
+        loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        loss += dist.mean.pow(2).mean() * regularization_weight
         
         
-        return loss.mean(), dist.entropy().mean()
+        return loss, dist.entropy().mean()
 
     @staticmethod
     def compute_value_loss(value_model: NNMODEL,
@@ -31,9 +31,9 @@ class PPO:
                             returns: torch.Tensor) -> torch.Tensor:
         
         values = value_model(observations)
-        loss = 0.5 * (values - returns) ** 2
+        loss = (0.5 * (values - returns) ** 2).mean()
         
-        return loss.mean()
+        return loss
     
     @staticmethod
     def compute_clipped_value_loss(value_model: NNMODEL,
@@ -42,10 +42,10 @@ class PPO:
                                    returns: torch.Tensor,
                                    clip_ratio: float) -> torch.Tensor:
         values = value_model(observations).squeeze()
-        loss_unclipped = 0.5 * (values - returns) ** 2
+        loss_unclipped = (0.5 * (values - returns) ** 2).mean()
 
         values_clipped = values_hat+ torch.clamp(values - values_hat, -clip_ratio, clip_ratio)
-        loss_clipped = 0.5 * (values_clipped - returns) ** 2
+        loss_clipped = (0.5 * (values_clipped - returns) ** 2).mean()
 
         loss = torch.max(loss_unclipped, loss_clipped)
 
