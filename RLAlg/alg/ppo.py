@@ -11,7 +11,8 @@ class PPO:
                            observations: torch.Tensor,
                            actions: torch.Tensor,
                            advantages: torch.Tensor,
-                           clip_ratio: float) -> torch.Tensor:
+                           clip_ratio: float,
+                           regularization_weight:float=0) -> torch.Tensor:
         
         dist, _, log_probs = policy_model(observations, actions)
         
@@ -19,6 +20,8 @@ class PPO:
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
         
         loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+        loss += dist.mean.pow(2) * regularization_weight
+        
         
         return loss.mean(), dist.entropy().mean()
 
