@@ -125,7 +125,7 @@ class GuassianHead(nn.Module):
         mu = self.mu_layer(x)
         mu = self.max_action * torch.tanh(mu)
         std = torch.exp(self.log_std)
-        pi = TruncatedNormal(mu, std, -self.max_action, self.max_action)
+        pi = Normal(mu, std)
         if action is None:
             action = pi.sample()
 
@@ -177,7 +177,7 @@ class SquashedGaussianHead(nn.Module):
         if with_logprob:
             log_prob = pi.log_prob(x)
             log_prob -= torch.log(self.max_action * (1 - x_tanh.pow(2)) + 1e-6)
-            log_prob = log_prob.sum(1)
+            log_prob = log_prob.sum(-1)
 
         action = torch.tanh(x)
         action = self.max_action * action
@@ -225,3 +225,14 @@ class CriticHead(nn.Module):
         value = self.critic_layer(x)
 
         return value.squeeze(-1)
+
+def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:any, norm:bool):
+    layers = []
+
+    for dim in layer_dims:
+        mlp = MLPLayer(in_dim, dim, activate_function, norm)
+        in_dim = dim
+
+        layers.append(mlp)
+
+    return layers
