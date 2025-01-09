@@ -124,7 +124,7 @@ class GuassianHead(nn.Module):
         mu = self.mu_layer(x)
         mu = self.max_action * torch.tanh(mu)
         std = torch.exp(self.log_std)
-        pi = Normal(mu, std)
+        pi = TruncatedNormal(mu, std, -self.max_action, self.max_action)
         if action is None:
             action = pi.sample()
 
@@ -164,7 +164,7 @@ class SquashedGaussianHead(nn.Module):
         log_std = torch.tanh(log_std)
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
         std = torch.exp(log_std)
-        pi = Normal(mu, std)
+        pi = TruncatedNormal(mu, std)
         if deterministic:
             x = mu
         else:
@@ -250,7 +250,7 @@ class DistributeCriticHead(nn.Module):
         
         q_std = torch.exp(log_std)
         
-        dist = Normal(q_mu, q_std)
+        dist = TruncatedNormal(q_mu, q_std)
         q_sample = dist.rsample()
         
         return q_mu, q_std, q_sample
