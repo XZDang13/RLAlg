@@ -17,14 +17,14 @@ class RolloutBuffer:
         self.returns = torch.zeros((steps, num_envs))
         self.advantages = torch.zeros((steps, num_envs))
 
-    def add_steps(self, step:int, state:torch.Tensor, action:torch.Tensor, log_prob:torch.Tensor, reward:torch.Tensor, done:torch.Tensor, value:torch.Tensor|None=None):
-        self.states[step] = state
-        self.actions[step] = action
-        self.log_probs[step] = log_prob
-        self.rewards[step] = reward
-        self.dones[step] = done
+    def add_steps(self, step:int, state:any, action:any, log_prob:any, reward:any, done:any, value:any|None=None):
+        self.states[step] = torch.as_tensor(state)
+        self.actions[step] = torch.as_tensor(action)
+        self.log_probs[step] = torch.as_tensor(log_prob)
+        self.rewards[step] = torch.as_tensor(reward)
+        self.dones[step] = torch.as_tensor(done)
         if value is not None:
-            self.values[step] = value
+            self.values[step] = torch.as_tensor(value)
 
     def compute_advantage(self, gamma:float=0.99):
         next_return = torch.zeros(self.num_envs)
@@ -35,8 +35,8 @@ class RolloutBuffer:
 
         self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
 
-    def compute_gae(self, last_value:torch.Tensor, gamma:float=0.99, lambda_:float=0.95):
-        next_value = last_value
+    def compute_gae(self, last_value:any, gamma:float=0.99, lambda_:float=0.95):
+        next_value = torch.as_tensor(last_value)
         next_advantage = torch.zeros(self.num_envs)
         for step in reversed(range(self.steps)):
             delta = self.rewards[step] + gamma * next_value * (1.0 - self.dones[step]) - self.values[step]
