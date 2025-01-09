@@ -1,4 +1,4 @@
-import numpy as np
+from typing import Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +8,7 @@ from ..utils import weight_init
 
 
 class MLPLayer(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+    def __init__(self, in_dim:int, out_dim:int, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(MLPLayer, self).__init__()
         bias = not norm
         self.linear = nn.Linear(in_dim, out_dim, bias)
@@ -35,7 +35,7 @@ class MLPLayer(nn.Module):
     
 class Conv1DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv1DLayer, self).__init__()
         bias = not norm
         self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
@@ -62,7 +62,7 @@ class Conv1DLayer(nn.Module):
     
 class Conv2DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv2DLayer, self).__init__()
         bias = not norm
         self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
@@ -255,7 +255,7 @@ class DistributeCriticHead(nn.Module):
         
         return q_mu, q_std, q_sample
 
-def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
+def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
     layers = []
 
     for dim in layer_dims:
