@@ -29,7 +29,7 @@ class DSAC:
                        alpha: float,
                        gamma: float,
                        td_bound: float
-                    ):
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
         
         target_q = reward + (1 - done) * gamma * (
             q_next - alpha * next_log_prob
