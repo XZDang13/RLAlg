@@ -17,7 +17,7 @@ class RolloutBuffer:
         self.returns = torch.zeros((steps, num_envs))
         self.advantages = torch.zeros((steps, num_envs))
 
-    def add_steps(self, step:int, state:any, action:any, log_prob:any, reward:any, done:any, value:any|None=None):
+    def add_steps(self, step:int, state:any, action:any, log_prob:any, reward:any, done:any, value:any=None):
         self.states[step] = torch.as_tensor(state)
         self.actions[step] = torch.as_tensor(action)
         self.log_probs[step] = torch.as_tensor(log_prob)
