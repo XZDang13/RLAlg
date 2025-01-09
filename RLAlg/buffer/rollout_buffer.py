@@ -47,7 +47,7 @@ class RolloutBuffer:
 
         self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
 
-    def batch_sample(self, batch_size: int) -> Generator[dict[str, torch.Tensor]]:
+    def batch_sample(self, batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
         total_steps = self.steps * self.num_envs
         indices = torch.randperm(total_steps)
 
