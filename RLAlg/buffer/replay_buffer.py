@@ -1,6 +1,3 @@
-from typing import Dict
-from collections import namedtuple
-import numpy as np
 import torch
 
 class ReplayBuffer:
@@ -19,12 +16,12 @@ class ReplayBuffer:
         self.rewards = torch.zeros((self.max_step, num_envs))
         self.dones = torch.zeros((self.max_step, num_envs))
 
-    def add_steps(self, state, action, reward, done, next_state):
-        self.states[self.step] = torch.as_tensor(state)
-        self.actions[self.step] = torch.as_tensor(action)
-        self.rewards[self.step] = torch.as_tensor(reward)
-        self.dones[self.step] = torch.as_tensor(done)
-        self.next_states[self.step] = torch.as_tensor(next_state)
+    def add_steps(self, state:torch.Tensor, action:torch.Tensor, reward:torch.Tensor, done:torch.Tensor, next_state:torch.Tensor):
+        self.states[self.step] = state
+        self.actions[self.step] = action
+        self.rewards[self.step] = reward
+        self.dones[self.step] = done
+        self.next_states[self.step] = next_state
         
         self.step += 1
         
@@ -34,7 +31,7 @@ class ReplayBuffer:
         if self.step >= self.max_step:
             self.step = 0
             
-    def sample(self, batch_size):
+    def sample(self, batch_size:int) -> dict[str, torch.Tensor]:
         total_steps = self.current_size * self.num_envs
         indices = torch.randint(0, total_steps, (batch_size,))
         

@@ -2,6 +2,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import gymnasium
 
 def set_seed_everywhere(seed):
     torch.manual_seed(seed)

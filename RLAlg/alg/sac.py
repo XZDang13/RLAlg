@@ -36,13 +36,15 @@ class SAC:
 
         with torch.no_grad():
             next_action, next_log_prob, _, _ = actor_model(next_observation)
-            q1_targ, q2_targ = critic_target_model(next_observation, next_action)
+            q1_next, q2_next = critic_target_model(next_observation, next_action)
 
-            q_targ = torch.min(q1_targ, q2_targ)
-            backup = reward + gamma * (1 - done) * (q_targ - alpha * next_log_prob)
+            q_next = torch.min(q1_next, q2_next)
+            q_targ = reward + gamma * (1 - done) * (q_next - alpha * next_log_prob)
 
-        critic_1_loss = F.mse_loss(q1, backup)
-        critic_2_loss = F.mse_loss(q2, backup)
+        critic_1_loss = (0.5 * (q_targ - q1) ** 2).mean()
+        critic_2_loss = (0.5 * (q_targ - q2) ** 2).mean()
+        #critic_1_loss = F.mse_loss(q1, q_targ)
+        #critic_2_loss = F.mse_loss(q2, q_targ)
         critic_loss = critic_1_loss + critic_2_loss
 
         return critic_loss

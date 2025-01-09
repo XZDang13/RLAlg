@@ -1,4 +1,3 @@
-from typing import Callable, Tuple, Optional
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,7 +8,7 @@ from ..utils import weight_init
 
 
 class MLPLayer(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+    def __init__(self, in_dim:int, out_dim:int, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(MLPLayer, self).__init__()
         bias = not norm
         self.linear = nn.Linear(in_dim, out_dim, bias)
@@ -36,7 +35,7 @@ class MLPLayer(nn.Module):
     
 class Conv1DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv1DLayer, self).__init__()
         bias = not norm
         self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
@@ -63,7 +62,7 @@ class Conv1DLayer(nn.Module):
     
 class Conv2DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func:callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
         super(Conv2DLayer, self).__init__()
         bias = not norm
         self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
@@ -121,7 +120,7 @@ class GuassianHead(nn.Module):
         if self.mu_layer.bias is not None:
             nn.init.uniform_(self.mu_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
+    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
         mu = self.mu_layer(x)
         mu = self.max_action * torch.tanh(mu)
         std = torch.exp(self.log_std)
@@ -158,7 +157,7 @@ class SquashedGaussianHead(nn.Module):
             nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
 
     def forward(self, x:torch.Tensor, deterministic:bool=False,
-                with_logprob:bool=True) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+                with_logprob:bool=True) -> tuple[torch.Tensor, torch.Tensor|None,
                                                  torch.Tensor, torch.Tensor]:
         mu = self.mu_layer(x)
         log_std = self.log_std_layer(x)
@@ -197,7 +196,7 @@ class CategoricalHead(nn.Module):
         if self.logit_layer.bias is not None:
             nn.init.uniform_(self.logit_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor, action:Optional[torch.Tensor]) -> Tuple[Distribution, Optional[torch.Tensor]]:
+    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
         
@@ -225,8 +224,38 @@ class CriticHead(nn.Module):
         value = self.critic_layer(x)
 
         return value.squeeze(-1)
+    
+class DistributeCriticHead(nn.Module):
+    def __init__(self, feature_dim:int) -> None:
+        super().__init__()
 
-def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:any, norm:bool):
+        self.mu_layer = nn.Linear(feature_dim, 1)
+        self.log_std_layer = nn.Linear(feature_dim, 1)
+        
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.uniform_(self.mu_layer.weight, -3e-3, 3e-3)
+        if self.mu_layer.bias is not None:
+            nn.init.uniform_(self.mu_layer.bias, -3e-3, 3e-3)
+            
+        nn.init.uniform_(self.log_std_layer.weight, -3e-3, 3e-3)
+        if self.log_std_layer.bias is not None:
+            nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        q_mu = self.mu_layer(x).squeeze(-1)
+        log_std = self.log_std_layer(x).squeeze(-1)
+        log_std = torch.tanh(log_std)
+        
+        q_std = torch.exp(log_std)
+        
+        dist = Normal(q_mu, q_std)
+        q_sample = dist.rsample()
+        
+        return q_mu, q_std, q_sample
+
+def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
     layers = []
 
     for dim in layer_dims:
@@ -235,4 +264,4 @@ def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:any, nor
 
         layers.append(mlp)
 
-    return layers
+    return nn.Sequential(*layers), in_dim

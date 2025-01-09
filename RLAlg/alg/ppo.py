@@ -31,7 +31,7 @@ class PPO:
                             returns: torch.Tensor) -> torch.Tensor:
         
         values = value_model(observations)
-        loss = (0.5 * (values - returns) ** 2).mean()
+        loss = (0.5 * (returns - values) ** 2).mean()
         
         return loss
     
@@ -42,10 +42,10 @@ class PPO:
                                    returns: torch.Tensor,
                                    clip_ratio: float) -> torch.Tensor:
         values = value_model(observations).squeeze()
-        loss_unclipped = (0.5 * (values - returns) ** 2).mean()
+        loss_unclipped = (0.5 * (returns - values) ** 2)
 
-        values_clipped = values_hat+ torch.clamp(values - values_hat, -clip_ratio, clip_ratio)
-        loss_clipped = (0.5 * (values_clipped - returns) ** 2).mean()
+        values_clipped = values_hat + torch.clamp(values - values_hat, -clip_ratio, clip_ratio)
+        loss_clipped = (0.5 * (returns - values_clipped) ** 2)
 
         loss = torch.max(loss_unclipped, loss_clipped)
 
