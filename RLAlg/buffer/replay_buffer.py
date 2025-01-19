@@ -1,3 +1,4 @@
+import os
 import torch
 
 class ReplayBuffer:
@@ -42,3 +43,16 @@ class ReplayBuffer:
                 "dones": self.dones[:self.current_size].view(-1)[indices],
                 "next_states": self.next_states[:self.current_size].view(-1, *self.state_dim)[indices]
         }
+        
+    def save(self, folder_path: str):
+        """Save replay buffer data to the specified folder."""
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+        
+        torch.save([
+            self.states[:self.current_size].view(-1, *self.state_dim),
+            self.actions[:self.current_size].view(-1, *self.action_dim),
+            self.rewards[:self.current_size].view(-1),
+            self.dones[:self.current_size].view(-1),
+            self.next_states[:self.current_size].view(-1, *self.state_dim)
+        ], f"{folder_path}/replays.pt")

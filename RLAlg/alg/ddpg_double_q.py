@@ -22,10 +22,10 @@ class DDPGDoubleQ:
             next_action = dist.sample(0.3)
             next_qvalue_target_1, next_qvalue_target_2 = critic_target_model(next_observation, next_action)
             next_qvalue_target = torch.min(next_qvalue_target_1, next_qvalue_target_2)
-            target = reward + gamma * (1 - done) * next_qvalue_target
+            q_targ = reward + gamma * (1 - done) * next_qvalue_target
 
         qvalue_1, qvalue_2 = critic_model(observation, action)
-        critic_loss = F.mse_loss(qvalue_1, target) + F.mse_loss(qvalue_2, target)
+        critic_loss = F.mse_loss(qvalue_1, q_targ) + F.mse_loss(qvalue_2, q_targ)
 
         return critic_loss
     

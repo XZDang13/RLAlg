@@ -10,52 +10,58 @@ def asymmetric_l2_loss(u, tau):
 
 class IQL:
     @staticmethod
-    def compute_value_loss(value, critic_target, observation, action, expectile):
+    def compute_value_loss(value_model:nn.Module, critic_target_model:nn.Module,
+                           observation:torch.Tensor, action:torch.Tensor, expectile:float) -> torch.Tensor:
         with torch.no_grad():
-            q1, q2 = critic_target(observation, action)
+            q1, q2 = critic_target_model(observation, action)
             q = torch.min(q1, q2).detach()
 
-        v = value(observation)
-        diff = q-v
+        value = value_model(observation)
+        diff = q-value
         value_loss = asymmetric_l2_loss(diff, expectile)
 
         return value_loss
 
 
     @staticmethod
-    def compute_actor_loss(actor, value, critic_target, observation, action, temperature):
+    def compute_actor_loss(actor_model:nn.Module, value_model:nn.Module,
+                           critic_target_model:nn.Module, observation:torch.Tensor,
+                           action:torch.Tensor, temperature:float) -> torch.Tensor:
         with torch.no_grad():
-            v = value(observation)
-            q1, q2 = critic_target(observation, action)
+            value = value_model(observation)
+            q1, q2 = critic_target_model(observation, action)
             q = torch.min(q1, q2)
 
-        exp_a = torch.exp((q - v) * temperature)
+        exp_a = torch.exp((q - value) * temperature)
         exp_a = torch.min(exp_a, torch.FloatTensor([100.0]).to(observation.device))
 
-        action, log_prob = actor.sample_action(observation)
-
+        _, _, log_prob = actor_model(observation, action)
+        
         actor_loss = -(exp_a * log_prob).mean()
 
-        return actor_loss, log_prob.mean(), 0
+        return actor_loss
     
     @staticmethod
-    def compute_critic_loss(value, critic, observation, action, reward, mask, next_observation, gamma):
+    def compute_critic_loss(value_model:nn.Module, critic_model:nn.Module,
+                            observation:torch.Tensor, action:torch.Tensor,
+                            reward:torch.Tensor, done:torch.Tensor,
+                            next_observation:torch.Tensor, gamma:float) -> torch.Tensor:
 
         with torch.no_grad():
-            next_v = value(next_observation)
-            backup = (reward + gamma * (1-mask) * next_v).detach()
+            next_value = value_model(next_observation)
+            q_targ = (reward + gamma * (1-done) * next_value)
 
-        q1, q2 = critic(observation, action)
+        q1, q2 = critic_model(observation, action)
 
-        critic_1_loss = ((q1 - backup)**2).mean()
-        critic_2_loss = ((q2 - backup)**2).mean()
+        critic_1_loss = ((q1 - q_targ)**2).mean()
+        critic_2_loss = ((q2 - q_targ)**2).mean()
         critic_loss = critic_1_loss + critic_2_loss
 
-        return critic_loss, q1.mean(), q2.mean(), backup.mean()
+        return critic_loss
     
     @staticmethod
     @torch.no_grad()
-    def update_target_param(model: NNMODEL, model_target: NNMODEL, tau: float) -> None:
+    def update_target_param(model: nn.Module, model_target: nn.Module, tau: float) -> None:
         for param, param_target in zip(model.parameters(), model_target.parameters()):
             param_target.data.mul_(1 - tau)
             param_target.data.add_(tau * param.data)

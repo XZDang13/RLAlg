@@ -20,9 +20,9 @@ class DDPG:
         with torch.no_grad():
             next_action = actor_target_model(next_observation)
             next_qvalue_target = critic_target_model(next_observation, next_action).detach()
-            target = reward + gamma * (1 - done) * next_qvalue_target
+            q_targ = reward + gamma * (1 - done) * next_qvalue_target
 
-        critic_loss = ((qvalue-target)**2).mean()
+        critic_loss = ((qvalue-q_targ)**2).mean()
 
         return critic_loss
 
