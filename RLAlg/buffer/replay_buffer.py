@@ -1,66 +1,84 @@
 import os
 import torch
+from torch import Tensor
+
 
 class ReplayBuffer:
     def __init__(
         self,
         num_envs: int,
         max_size: int,
-        state_dim: tuple[int],
-        action_dim: tuple[int],
-        state_dtype: torch.dtype = torch.float32,
-        device: torch.device = torch.device("cpu")
+        observation_space: dict[str, tuple[tuple[int], torch.dtype]],
+        action_space: dict[str, tuple[tuple[int], torch.dtype]],
+        reward_space: list[str],
+        device: torch.device = torch.device("cpu"),
     ):
         self.num_envs = num_envs
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.max_step = max_size // self.num_envs
+        self.max_step = max_size // num_envs
         self.device = device
-        self.state_dtype = state_dtype
 
         self.step = 0
         self.current_size = 0
 
-        self.states = torch.zeros((self.max_step, num_envs) + state_dim, dtype=state_dtype, device=self.device)
-        self.next_states = torch.zeros((self.max_step, num_envs) + state_dim, dtype=state_dtype, device=self.device)
-        self.actions = torch.zeros((self.max_step, num_envs) + action_dim, dtype=torch.float32, device=self.device)
-        self.rewards = torch.zeros((self.max_step, num_envs), dtype=torch.float32, device=self.device)
-        self.dones = torch.zeros((self.max_step, num_envs), dtype=torch.float32, device=self.device)
+        self.data: dict[str, Tensor] = {}
+        self.dtypes: dict[str, torch.dtype] = {}
+        self.shapes: dict[str, tuple[int]] = {}
 
-    def add_steps(self, state: any, action: any, reward: any, done: any, next_state: any):
-        self.states[self.step] = torch.as_tensor(state, dtype=self.state_dtype, device=self.device)
-        self.actions[self.step] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
-        self.rewards[self.step] = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
-        self.dones[self.step] = torch.as_tensor(done, dtype=torch.float32, device=self.device)
-        self.next_states[self.step] = torch.as_tensor(next_state, dtype=self.state_dtype, device=self.device)
+        # Observations and next observations
+        for key, (shape, dtype) in observation_space.items():
+            for prefix in ["", "next_"]:
+                name = f"{prefix}{key}_obs"
+                self.data[name] = torch.zeros((self.max_step, num_envs, *shape), dtype=dtype, device=device)
+                self.dtypes[name] = dtype
+                self.shapes[name] = shape
 
-        self.step += 1
-        if self.current_size < self.max_step:
-            self.current_size += 1
-        if self.step >= self.max_step:
-            self.step = 0
+        # Actions
+        for key, (shape, dtype) in action_space.items():
+            name = f"{key}_actions"
+            self.data[name] = torch.zeros((self.max_step, num_envs, *shape), dtype=dtype, device=device)
+            self.dtypes[name] = dtype
+            self.shapes[name] = shape
 
-    def sample(self, batch_size: int) -> dict[str, torch.Tensor]:
-        total_steps = self.current_size * self.num_envs
-        indices = torch.randint(0, total_steps, (batch_size,), device=self.device)
-        return {
-            "states": self.states[:self.current_size].view(-1, *self.state_dim)[indices],
-            "actions": self.actions[:self.current_size].view(-1, *self.action_dim)[indices],
-            "rewards": self.rewards[:self.current_size].view(-1)[indices],
-            "dones": self.dones[:self.current_size].view(-1)[indices],
-            "next_states": self.next_states[:self.current_size].view(-1, *self.state_dim)[indices]
+        # Rewards and dones
+        for key in reward_space:
+            self.data[f"{key}_rewards"] = torch.zeros((self.max_step, num_envs), dtype=torch.float32, device=device)
+            self.dtypes[f"{key}_rewards"] = torch.float32
+
+        self.data["dones"] = torch.zeros((self.max_step, num_envs), dtype=torch.float32, device=device)
+        self.dtypes["dones"] = torch.float32
+
+    def add_steps(self, record: dict[str, any]) -> None:
+        for key, value in record.items():
+            if key in self.data:
+                self.data[key][self.step] = torch.as_tensor(value, dtype=self.dtypes[key], device=self.device)
+
+        self.step = (self.step + 1) % self.max_step
+        self.current_size = min(self.current_size + 1, self.max_step)
+
+    def sample(self, batch_size: int) -> dict[str, Tensor]:
+        total = self.current_size * self.num_envs
+        indices = torch.randint(0, total, (batch_size,), device=self.device)
+
+        batch = {}
+        for key, tensor in self.data.items():
+            shape = tensor.shape[2:]  # drop (T, N)
+            flat = tensor[:self.current_size].reshape(total, *shape)
+            batch[key] = flat[indices]
+
+        return batch
+
+    def save(self, folder_path: str) -> None:
+        os.makedirs(folder_path, exist_ok=True)
+        save_data = {
+            key: tensor[:self.current_size].reshape(-1, *tensor.shape[2:]).cpu()
+            for key, tensor in self.data.items()
         }
+        torch.save(save_data, os.path.join(folder_path, "replays.pt"))
 
-    def save(self, folder_path: str):
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-        torch.save([
-            self.states[:self.current_size].view(-1, *self.state_dim).cpu(),
-            self.actions[:self.current_size].view(-1, *self.action_dim).cpu(),
-            self.rewards[:self.current_size].view(-1).cpu(),
-            self.dones[:self.current_size].view(-1).cpu(),
-            self.next_states[:self.current_size].view(-1, *self.state_dim).cpu()
-        ], f"{folder_path}/replays.pt")
+    def to(self, device: torch.device) -> None:
+        self.device = device
+        for key in self.data:
+            self.data[key] = self.data[key].to(device)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.current_size * self.num_envs

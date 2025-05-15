@@ -6,6 +6,29 @@ NNMODEL = nn.Module
 
 class PPO:
     @staticmethod
+    def compute_policy_loss_with_multi_critic(policy_model: NNMODEL,
+                           log_probs_hat: torch.Tensor,
+                           observations: torch.Tensor,
+                           actions: torch.Tensor,
+                           advantages_list: list[torch.Tensor],
+                           weights: list[float],
+                           clip_ratio: float,
+                           regularization_weight:float=0) -> torch.Tensor:
+        
+        dist, _, log_probs = policy_model(observations, actions)
+        
+        ratio = (log_probs - log_probs_hat).exp()
+        clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
+        loss = 0
+        for weight, advantages in zip(weights, advantages_list):
+            loss += -torch.min(ratio * advantages, clipped_ratio * advantages).mean() * weight
+            
+        loss += dist.mean.pow(2).mean() * regularization_weight
+        
+        
+        return loss, dist.entropy().mean()
+    
+    @staticmethod
     def compute_policy_loss(policy_model: NNMODEL,
                            log_probs_hat: torch.Tensor,
                            observations: torch.Tensor,
