@@ -6,6 +6,16 @@ NNMODEL = nn.Module
 
 class PPO:
     @staticmethod
+    def compute_kl_divergence(log_probs: torch.Tensor,
+                              log_probs_hat: torch.Tensor) -> torch.Tensor:
+        
+        with torch.no_grad():
+            ratio = (log_probs - log_probs_hat)
+            kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
+            
+        return kl_divergence
+    
+    @staticmethod
     def compute_policy_loss_with_multi_critic(policy_model: NNMODEL,
                            log_probs_hat: torch.Tensor,
                            observations: torch.Tensor,
@@ -16,7 +26,9 @@ class PPO:
                            regularization_weight:float=0) -> torch.Tensor:
         
         dist, _, log_probs = policy_model(observations, actions)
-        
+
+        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
+
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
         loss = 0
@@ -26,7 +38,7 @@ class PPO:
         loss += dist.mean.pow(2).mean() * regularization_weight
         
         
-        return loss, dist.entropy().mean()
+        return loss, dist.entropy().mean(), kl_divergence
     
     @staticmethod
     def compute_policy_loss(policy_model: NNMODEL,
@@ -39,6 +51,8 @@ class PPO:
         
         dist, _, log_probs = policy_model(observations, actions)
         
+        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
+
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
         
@@ -46,7 +60,7 @@ class PPO:
         loss += dist.mean.pow(2).mean() * regularization_weight
         
         
-        return loss, dist.entropy().mean()
+        return loss, dist.entropy().mean(), kl_divergence
 
     @staticmethod
     def compute_value_loss(value_model: NNMODEL,

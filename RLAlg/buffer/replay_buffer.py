@@ -51,8 +51,14 @@ class ReplayBuffer:
         self.step = 0
         self.current_size = 0
 
-    def create_storage_space(self, key_name: str, shape: tuple[int], dtype: torch.dtype=torch.float32) -> None:
-        self.data[key_name] = torch.zeros((self.steps, self.num_envs, *shape), dtype=dtype, device=self.device)
+    def reset(self) -> None:
+        self.step = 0
+        self.current_size = 0
+        for key in self.data:
+            self.data[key].fill_(0)
+
+    def create_storage_space(self, key_name: str, data_shape: tuple[int]=(), dtype: torch.dtype=torch.float32) -> None:
+        self.data[key_name] = torch.zeros((self.steps, self.num_envs, *data_shape), dtype=dtype, device=self.device)
 
     def add_storage(self, key_name: str, values: Tensor) -> None:
         self.data[key_name] = values.to(self.device)
