@@ -14,7 +14,7 @@ class TruncatedNormal(pyd.Normal):
         x = x - x.detach() + clamped_x.detach()
         return x
 
-    def sample(self, clip=None, sample_shape=torch.Size()):
+    def rsample(self, clip=None, sample_shape=torch.Size()):
         shape = self._extended_shape(sample_shape)
         eps = _standard_normal(shape,
                                dtype=self.loc.dtype,

@@ -19,7 +19,7 @@ class DDPGDoubleQ:
         
         with torch.no_grad():
             dist = actor_model(next_observation, std)
-            next_action = dist.sample(0.3)
+            next_action = dist.rsample(0.3)
             next_qvalue_target_1, next_qvalue_target_2 = critic_target_model(next_observation, next_action)
             next_qvalue_target = torch.min(next_qvalue_target_1, next_qvalue_target_2)
             q_targ = reward + gamma * (1 - done) * next_qvalue_target
@@ -36,7 +36,7 @@ class DDPGDoubleQ:
                            std: torch.Tensor,
                            regularization_weight:float=0) -> torch.Tensor:
         dist = actor_model(observation, std)
-        action = dist.sample(0.3)
+        action = dist.rsample(0.3)
         q_value_1, q_value_2 = critic_model(observation, action)
         q_value = torch.min(q_value_1, q_value_2)
         actor_loss = -q_value.mean()
@@ -52,7 +52,7 @@ class DDPGDoubleQ:
                            std: torch.Tensor,
                            regularization_weight:float=0) -> torch.Tensor:
         dist = actor_model(observation, std)
-        action = dist.sample(0.3)
+        action = dist.rsample(0.3)
 
         actor_loss = 0
         for weight, critic_model in zip(weights, critic_models):
@@ -79,7 +79,7 @@ class DDPGDoubleQ:
         
         with torch.no_grad():
             dist = actor_model(critic_observation, std)
-            next_action = dist.sample(0.3)
+            next_action = dist.rsample(0.3)
             next_qvalue_target_1, next_qvalue_target_2 = critic_target_model(next_actor_observation, next_action)
             next_qvalue_target = torch.min(next_qvalue_target_1, next_qvalue_target_2)
             q_targ = reward + gamma * (1 - done) * next_qvalue_target
@@ -97,7 +97,7 @@ class DDPGDoubleQ:
                            std: torch.Tensor,
                            regularization_weight:float=0) -> torch.Tensor:
         dist = actor_model(actor_observation, std)
-        action = dist.sample(0.3)
+        action = dist.rsample(0.3)
         q_value_1, q_value_2 = critic_model(critic_observation, action)
         q_value = torch.min(q_value_1, q_value_2)
         actor_loss = -q_value.mean()
@@ -114,7 +114,7 @@ class DDPGDoubleQ:
                            std: torch.Tensor,
                            regularization_weight:float=0) -> torch.Tensor:
         dist = actor_model(actor_observation, std)
-        action = dist.sample(0.3)
+        action = dist.rsample(0.3)
 
         actor_loss = 0
         for weight, critic_model in zip(weights, critic_models):

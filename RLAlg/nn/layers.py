@@ -1,9 +1,8 @@
-from typing import Callable
+from typing import Callable, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, Categorical, Distribution
-from ..distribution import TruncatedNormal
+from torch.distributions import Normal, Categorical, TanhTransform, AffineTransform, TransformedDistribution
 from ..utils import weight_init
 
 
@@ -25,10 +24,10 @@ class MLPLayer(nn.Module):
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.linear(x)
-        if self.norm:
+        if self.norm is not None:
             x = self.norm(x)
 
-        if self.activate_func:
+        if self.activate_func is not None:
             x = self.activate_func(x)
         
         return x
@@ -52,10 +51,10 @@ class Conv1DLayer(nn.Module):
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.conv1d(x)
-        if self.norm:
+        if self.norm is not None:
             x = self.norm(x)
 
-        if self.activate_func:
+        if self.activate_func is not None:
             x = self.activate_func(x)
         
         return x
@@ -79,20 +78,22 @@ class Conv2DLayer(nn.Module):
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.conv2d(x)
-        if self.norm:
+        if self.norm is not None:
             x = self.norm(x)
 
-        if self.activate_func:
+        if self.activate_func is not None:
             x = self.activate_func(x)
         
         return x
     
-class DeterminicHead(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int, max_action:float=1.0) -> None:
+class DeterministicHead(nn.Module):
+    """
+    Deterministic policy head.
+    """
+    def __init__(self, feature_dim: int, action_dim: int, max_action: Optional[float] = None) -> None:
         super().__init__()
         self.max_action = max_action
         self.linear = nn.Linear(feature_dim, action_dim)
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -100,50 +101,56 @@ class DeterminicHead(nn.Module):
         if self.linear.bias is not None:
             nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: input features
+
+        Returns:
+            deterministic action in [-max_action, max_action]
+        """
         x = self.linear(x)
-        x = self.max_action * torch.tanh(x)
-
+        if self.max_action is not None:
+            x = self.max_action * torch.tanh(x)
         return x
-    
-class GuassianHead(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int, max_action:float=1) -> None:
+
+
+class GaussianHead(nn.Module):
+    """
+    Gaussian policy head.
+    Supports state-independent or state-dependent log_std.
+    """
+    def __init__(
+        self,
+        feature_dim: int,
+        action_dim: int,
+        log_std_min: float = -10,
+        log_std_max: float = 2,
+        max_action: Optional[float] = None,
+        state_dependent_std: bool = False,
+    ) -> None:
         super().__init__()
 
         self.mu_layer = nn.Linear(feature_dim, action_dim)
-        self.log_std = torch.nn.Parameter(torch.zeros(action_dim))
-        self.max_action = max_action    
-        self.reset_parameters()
 
-    def reset_parameters(self):
-        nn.init.uniform_(self.mu_layer.weight, -3e-3, 3e-3)
-        if self.mu_layer.bias is not None:
-            nn.init.uniform_(self.mu_layer.bias, -3e-3, 3e-3)
-
-    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
-        mu = self.mu_layer(x)
-        mu = self.max_action * torch.tanh(mu)
-        std = torch.exp(self.log_std)
-        pi = Normal(mu, std)
-        if action is None:
-            action = pi.sample()
-
-        log_prob = pi.log_prob(action).sum(axis=-1)
-        
-        return pi, action, log_prob
-
-class SquashedGaussianHead(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int,
-                 max_action:float=1.0, log_std_min:float=-20,
-                 log_std_max:float=2) -> None:
-        super().__init__()
-
-        self.mu_layer = nn.Linear(feature_dim, action_dim)
-        self.log_std_layer = nn.Linear(feature_dim, action_dim)
-        self.max_action = max_action
+        self.state_dependent_std = state_dependent_std
+        if state_dependent_std:
+            self.log_std_layer = nn.Linear(feature_dim, action_dim)
+        else:
+            self.log_std = nn.Parameter(torch.zeros(action_dim))
 
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        self.max_action = max_action
+
+        if self.max_action is not None:
+            self.transform = [
+                TanhTransform(cache_size=1),
+                AffineTransform(loc=0, scale=max_action)
+            ]
+        else:
+            self.transform = []
 
         self.reset_parameters()
 
@@ -152,43 +159,63 @@ class SquashedGaussianHead(nn.Module):
         if self.mu_layer.bias is not None:
             nn.init.uniform_(self.mu_layer.bias, -3e-3, 3e-3)
 
-        nn.init.uniform_(self.log_std_layer.weight, -3e-3, 3e-3)
-        if self.log_std_layer.bias is not None:
-            nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
+        if self.state_dependent_std:
+            nn.init.uniform_(self.log_std_layer.weight, -3e-3, 3e-3)
+            if self.log_std_layer.bias is not None:
+                nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor, deterministic:bool=False,
-                with_logprob:bool=True) -> tuple[torch.Tensor, torch.Tensor|None,
-                                                 torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        action: Optional[torch.Tensor] = None
+    ) -> Tuple[TransformedDistribution, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: input features
+            action: optional, if None sample from policy
+
+        Returns:
+            pi: TransformedDistribution
+            action: [B, action_dim]
+            log_prob: [B]
+            mu: [B, action_dim]
+            log_std: [B, action_dim]
+        """
         mu = self.mu_layer(x)
-        log_std = self.log_std_layer(x)
-        log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
-        std = torch.exp(log_std)
-        pi = Normal(mu, std)
-        if deterministic:
-            x = mu
+
+        if self.state_dependent_std:
+            log_std = self.log_std_layer(x)
+            log_std = torch.tanh(log_std)
+            log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
         else:
-            x = pi.rsample()
+            log_std = self.log_std.expand_as(mu)
+            log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
 
-        x_tanh = torch.tanh(x)
+        std = torch.exp(log_std)
 
-        log_prob = None
-        if with_logprob:
-            log_prob = pi.log_prob(x)
-            log_prob -= torch.log(self.max_action * (1 - x_tanh.pow(2)) + 1e-6)
-            log_prob = log_prob.sum(-1)
+        base_pi = Normal(mu, std)
+        pi = TransformedDistribution(base_pi, self.transform)
 
-        action = torch.tanh(x)
-        action = self.max_action * action
+        if action is None:
+            action = pi.rsample()
 
-        return action, log_prob, mu, log_std
+        log_prob = pi.log_prob(action).sum(axis=-1)
+
+        # deterministic mu after squashing if needed
+        if self.max_action is not None:
+            mu_squashed = self.max_action * torch.tanh(mu)
+        else:
+            mu_squashed = mu
+
+        return pi, action, log_prob, mu_squashed, log_std
 
 class CategoricalHead(nn.Module):
-    def __init__(self, feature_dim:int, action_dim:int) -> None:
+    """
+    Categorical (discrete) policy head.
+    """
+    def __init__(self, feature_dim: int, action_dim: int) -> None:
         super().__init__()
-
         self.logit_layer = nn.Linear(feature_dim, action_dim)
-        
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -196,23 +223,32 @@ class CategoricalHead(nn.Module):
         if self.logit_layer.bias is not None:
             nn.init.uniform_(self.logit_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor, action:torch.Tensor|None) -> tuple[Distribution, torch.Tensor|None]:
+    def forward(
+        self, x: torch.Tensor, action: Optional[torch.Tensor] = None
+    ) -> Tuple[Categorical, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: input features
+            action: optional, if None sample from policy
+
+        Returns:
+            distribution, action, log_prob
+        """
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
-        
         if action is None:
-            action = pi.sample()
-        
+            action = pi.rsample()
         log_prob = pi.log_prob(action)
-        
         return pi, action, log_prob
-    
+
+
 class CriticHead(nn.Module):
-    def __init__(self, feature_dim:int) -> None:
+    """
+    Value function head.
+    """
+    def __init__(self, feature_dim: int) -> None:
         super().__init__()
-
         self.critic_layer = nn.Linear(feature_dim, 1)
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -220,39 +256,50 @@ class CriticHead(nn.Module):
         if self.critic_layer.bias is not None:
             nn.init.uniform_(self.critic_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: input features
+
+        Returns:
+            scalar value
+        """
         value = self.critic_layer(x)
-
         return value.squeeze(-1)
-    
-class DistributeCriticHead(nn.Module):
-    def __init__(self, feature_dim:int) -> None:
-        super().__init__()
 
+
+class DistributeCriticHead(nn.Module):
+    """
+    Distributional critic head: outputs mean, std, and a sample.
+    """
+    def __init__(self, feature_dim: int) -> None:
+        super().__init__()
         self.mu_layer = nn.Linear(feature_dim, 1)
         self.log_std_layer = nn.Linear(feature_dim, 1)
-        
         self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.uniform_(self.mu_layer.weight, -3e-3, 3e-3)
         if self.mu_layer.bias is not None:
             nn.init.uniform_(self.mu_layer.bias, -3e-3, 3e-3)
-            
         nn.init.uniform_(self.log_std_layer.weight, -3e-3, 3e-3)
         if self.log_std_layer.bias is not None:
             nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: input features
+
+        Returns:
+            mean, std, sampled value
+        """
         q_mu = self.mu_layer(x).squeeze(-1)
         log_std = self.log_std_layer(x).squeeze(-1)
         log_std = torch.tanh(log_std)
-        
         q_std = torch.exp(log_std)
-        
         dist = Normal(q_mu, q_std)
         q_sample = dist.rsample()
-        
         return q_mu, q_std, q_sample
 
 def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
