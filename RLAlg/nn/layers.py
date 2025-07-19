@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal, Categorical, TanhTransform, AffineTransform, TransformedDistribution
+from .steps import DiscretePolicyStep, StochasticContinuousPolicyStep, DeterministicContinuousPolicyStep, ValueStep, DistributionStep
 from ..utils import weight_init
 
 
@@ -92,8 +93,17 @@ class DeterministicHead(nn.Module):
     """
     def __init__(self, feature_dim: int, action_dim: int, max_action: Optional[float] = None) -> None:
         super().__init__()
-        self.max_action = max_action
         self.linear = nn.Linear(feature_dim, action_dim)
+        self.max_action = max_action
+
+        if self.max_action is not None:
+            self.transform = [
+                TanhTransform(cache_size=1),
+                AffineTransform(loc=0, scale=max_action)
+            ]
+        else:
+            self.transform = []
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -102,7 +112,7 @@ class DeterministicHead(nn.Module):
             nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x:torch.Tensor, std:float=1.0) -> DeterministicContinuousPolicyStep:
         """
         Args:
             x: input features
@@ -110,11 +120,15 @@ class DeterministicHead(nn.Module):
         Returns:
             deterministic action in [-max_action, max_action]
         """
-        x = self.linear(x)
+        mu = self.linear(x)
+        base_pi = Normal(mu, std)
+        pi = TransformedDistribution(base_pi, self.transform)
+        
         if self.max_action is not None:
-            x = self.max_action * torch.tanh(x)
-        return x
+            mu_squashed = self.max_action * torch.tanh(mu)
 
+        step = DeterministicContinuousPolicyStep(pi, mu_squashed)
+        return step
 
 class GaussianHead(nn.Module):
     """
@@ -168,7 +182,7 @@ class GaussianHead(nn.Module):
         self,
         x: torch.Tensor,
         action: Optional[torch.Tensor] = None
-    ) -> Tuple[TransformedDistribution, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> StochasticContinuousPolicyStep:
         """
         Args:
             x: input features
@@ -207,7 +221,9 @@ class GaussianHead(nn.Module):
         else:
             mu_squashed = mu
 
-        return pi, action, log_prob, mu_squashed, log_std
+        step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std)
+
+        return step
 
 class CategoricalHead(nn.Module):
     """
@@ -225,7 +241,7 @@ class CategoricalHead(nn.Module):
 
     def forward(
         self, x: torch.Tensor, action: Optional[torch.Tensor] = None
-    ) -> Tuple[Categorical, torch.Tensor, torch.Tensor]:
+    ) -> DiscretePolicyStep:
         """
         Args:
             x: input features
@@ -239,7 +255,10 @@ class CategoricalHead(nn.Module):
         if action is None:
             action = pi.rsample()
         log_prob = pi.log_prob(action)
-        return pi, action, log_prob
+
+        step = DiscretePolicyStep(pi, action, log_prob)
+
+        return step
 
 
 class CriticHead(nn.Module):
@@ -256,7 +275,7 @@ class CriticHead(nn.Module):
         if self.critic_layer.bias is not None:
             nn.init.uniform_(self.critic_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> ValueStep:
         """
         Args:
             x: input features
@@ -265,7 +284,9 @@ class CriticHead(nn.Module):
             scalar value
         """
         value = self.critic_layer(x)
-        return value.squeeze(-1)
+
+        step = ValueStep(value=value.squeeze(-1))
+        return step
 
 
 class DistributeCriticHead(nn.Module):
@@ -286,7 +307,7 @@ class DistributeCriticHead(nn.Module):
         if self.log_std_layer.bias is not None:
             nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> DistributionStep:
         """
         Args:
             x: input features
@@ -298,9 +319,11 @@ class DistributeCriticHead(nn.Module):
         log_std = self.log_std_layer(x).squeeze(-1)
         log_std = torch.tanh(log_std)
         q_std = torch.exp(log_std)
-        dist = Normal(q_mu, q_std)
-        q_sample = dist.rsample()
-        return q_mu, q_std, q_sample
+        pi = Normal(q_mu, q_std)
+        q_sample = pi.rsample()
+
+        step = DistributionStep(pi, q_mu, q_std, q_sample)
+        return step
 
 def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
     layers = []
