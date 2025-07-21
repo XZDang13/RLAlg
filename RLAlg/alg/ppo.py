@@ -31,7 +31,7 @@ class PPO:
 
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
-        entropy = step.pi.entropy().mean()
+        entropy = step.entropy.mean()
 
         kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
 
@@ -60,7 +60,7 @@ class PPO:
 
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
-        entropy = step.pi.entropy().mean()
+        entropy = step.entropy.mean()
 
         kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
 

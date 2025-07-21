@@ -8,6 +8,7 @@ class DiscretePolicyStep:
     pi: Categorical
     action: torch.Tensor
     log_prob: torch.Tensor
+    entropy: torch.Tensor
 
 @dataclass
 class StochasticContinuousPolicyStep:
@@ -16,6 +17,7 @@ class StochasticContinuousPolicyStep:
     log_prob: torch.Tensor
     mean: torch.Tensor
     log_std: torch.Tensor
+    entropy: torch.Tensor
 
 @dataclass
 class DeterministicContinuousPolicyStep:

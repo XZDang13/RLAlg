@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -91,7 +91,7 @@ class DeterministicHead(nn.Module):
     """
     Deterministic policy head.
     """
-    def __init__(self, feature_dim: int, action_dim: int, max_action: Optional[float] = None) -> None:
+    def __init__(self, feature_dim: int, action_dim: int, max_action: Union[float, torch.Tensor, None] = None) -> None:
         super().__init__()
         self.linear = nn.Linear(feature_dim, action_dim)
         self.max_action = max_action
@@ -141,7 +141,7 @@ class GaussianHead(nn.Module):
         action_dim: int,
         log_std_min: float = -10,
         log_std_max: float = 2,
-        max_action: Optional[float] = None,
+        max_action: Union[float,torch.Tensor, None] = None,
         state_dependent_std: bool = False,
     ) -> None:
         super().__init__()
@@ -218,10 +218,12 @@ class GaussianHead(nn.Module):
         # deterministic mu after squashing if needed
         if self.max_action is not None:
             mu_squashed = self.max_action * torch.tanh(mu)
+            entropy = -log_prob
         else:
             mu_squashed = mu
+            entropy = pi.base_dist.entropy()
 
-        step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std)
+        step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 
         return step
 
@@ -255,8 +257,8 @@ class CategoricalHead(nn.Module):
         if action is None:
             action = pi.rsample()
         log_prob = pi.log_prob(action)
-
-        step = DiscretePolicyStep(pi, action, log_prob)
+        entropy = pi.entropy()
+        step = DiscretePolicyStep(pi, action, log_prob, entropy)
 
         return step
 
