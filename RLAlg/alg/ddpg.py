@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from nn.steps import DeterministicContinuousPolicyStep, ValueStep
+from ..nn.steps import DeterministicContinuousPolicyStep, ValueStep
 
 NNMODEL = nn.Module
 

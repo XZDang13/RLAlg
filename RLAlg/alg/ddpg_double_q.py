@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from nn.steps import DeterministicContinuousPolicyStep, ValueStep
+from ..nn.steps import DeterministicContinuousPolicyStep, ValueStep
 
 NNMODEL = nn.Module
 Q_STEPS = tuple[ValueStep, ValueStep]

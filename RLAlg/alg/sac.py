@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Tuple, List
-from nn.steps import StochasticContinuousPolicyStep, ValueStep
+from ..nn.steps import StochasticContinuousPolicyStep, ValueStep
 
 NNMODEL = nn.Module
 Q_STEPS = Tuple[ValueStep, ValueStep]

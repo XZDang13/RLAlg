@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Union
-from nn.steps import StochasticContinuousPolicyStep, DiscretePolicyStep, ValueStep
+from ..nn.steps import StochasticContinuousPolicyStep, DiscretePolicyStep, ValueStep
 
 NNMODEL = nn.Module
 

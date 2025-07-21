@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from nn.steps import StochasticContinuousPolicyStep, DiscretePolicyStep, ValueStep
+from ..nn.steps import StochasticContinuousPolicyStep, DiscretePolicyStep, ValueStep
 from typing import Tuple, Union
 
 Q_STEPS = Tuple[ValueStep, ValueStep]
