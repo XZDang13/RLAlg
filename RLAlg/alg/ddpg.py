@@ -17,13 +17,11 @@ class DDPG:
         done: torch.Tensor,
         gamma: float = 0.99,
     ) -> torch.Tensor:
-        qvalue: ValueStep = critic_model(torch.cat([observation, action], dim=-1))
+        qvalue: ValueStep = critic_model(observation, action)
         with torch.no_grad():
             next_action_step: DeterministicContinuousPolicyStep = actor_target_model(next_observation)
             next_action = next_action_step.mean
-            next_qvalue_target: ValueStep = critic_target_model(
-                torch.cat([next_observation, next_action], dim=-1)
-            )
+            next_qvalue_target: ValueStep = critic_target_model(next_observation, next_action)
             q_targ = reward + gamma * (1 - done) * next_qvalue_target.value
 
         critic_loss = ((qvalue.value - q_targ) ** 2).mean()
@@ -39,7 +37,7 @@ class DDPG:
         action_step: DeterministicContinuousPolicyStep = actor_model(observation)
         action = action_step.mean
 
-        q_value: ValueStep = critic_model(torch.cat([observation, action], dim=-1))
+        q_value: ValueStep = critic_model(observation, action)
         actor_loss = -q_value.value.mean()
 
         actor_loss += (action ** 2).mean() * regularization_weight
@@ -58,7 +56,7 @@ class DDPG:
 
         actor_loss = 0
         for weight, critic_model in zip(weights, critic_models):
-            q_value: ValueStep = critic_model(torch.cat([observation, action], dim=-1))
+            q_value: ValueStep = critic_model(observation, action)
             actor_loss += -q_value.value.mean() * weight
 
         actor_loss += (action ** 2).mean() * regularization_weight
@@ -77,13 +75,11 @@ class DDPG:
         done: torch.Tensor,
         gamma: float = 0.99,
     ) -> torch.Tensor:
-        qvalue: ValueStep = critic_model(torch.cat([critic_observation, action], dim=-1))
+        qvalue: ValueStep = critic_model(critic_observation, action)
         with torch.no_grad():
             next_action_step: DeterministicContinuousPolicyStep = actor_target_model(next_actor_observation)
             next_action = next_action_step.mean
-            next_qvalue_target: ValueStep = critic_target_model(
-                torch.cat([next_critic_observation, next_action], dim=-1)
-            )
+            next_qvalue_target: ValueStep = critic_target_model(next_critic_observation, next_action)
             q_targ = reward + gamma * (1 - done) * next_qvalue_target.value
 
         critic_loss = ((qvalue.value - q_targ) ** 2).mean()
@@ -100,7 +96,7 @@ class DDPG:
         action_step: DeterministicContinuousPolicyStep = actor_model(actor_observation)
         action = action_step.mean
 
-        q_value: ValueStep = critic_model(torch.cat([critic_observation, action], dim=-1))
+        q_value: ValueStep = critic_model(critic_observation, action)
         actor_loss = -q_value.value.mean()
 
         actor_loss += (action ** 2).mean() * regularization_weight

@@ -24,14 +24,14 @@ class DDPGDoubleQ:
         with torch.no_grad():
             dist: DeterministicContinuousPolicyStep = actor_model(next_observation, std)
             next_action = dist.pi.rsample()
-            q_target_steps:Q_STEPS = critic_target_model(torch.cat([next_observation, next_action], dim=-1))
+            q_target_steps:Q_STEPS = critic_target_model(next_observation, next_action)
             q1_target_step, q2_target_step = q_target_steps
             q1_target = q1_target_step.value
             q2_target = q2_target_step.value
             next_q = torch.min(q1_target, q2_target)
             q_target = reward + gamma * (1 - done) * next_q
 
-        q_steps:Q_STEPS = critic_model(torch.cat([observation, action], dim=-1))
+        q_steps:Q_STEPS = critic_model(observation, action)
         q1_step, q2_step = q_steps
         q1 = q1_step.value
         q2 = q2_step.value
@@ -50,7 +50,7 @@ class DDPGDoubleQ:
     ) -> torch.Tensor:
         dist: DeterministicContinuousPolicyStep = actor_model(observation, std)
         action = dist.pi.rsample()
-        q_steps:Q_STEPS = critic_model(torch.cat([observation, action], dim=-1))
+        q_steps:Q_STEPS = critic_model(observation, action)
         q1_step, q2_step = q_steps
         q1 = q1_step.value
         q2 = q2_step.value
@@ -75,7 +75,7 @@ class DDPGDoubleQ:
         actor_loss = 0
 
         for weight, critic_model in zip(weights, critic_models):
-            q_steps:Q_STEPS = critic_model(torch.cat([observation, action], dim=-1))
+            q_steps:Q_STEPS = critic_model(observation, action)
             q1_step, q2_step = q_steps
             q1 = q1_step.value
             q2 = q2_step.value
@@ -103,14 +103,14 @@ class DDPGDoubleQ:
         with torch.no_grad():
             dist: DeterministicContinuousPolicyStep = actor_model(next_actor_observation, std)
             next_action = dist.pi.rsample()
-            q_target_steps:Q_STEPS = critic_target_model(torch.cat([next_critic_observation, next_action], dim=-1))
+            q_target_steps:Q_STEPS = critic_target_model(next_critic_observation, next_action)
             q1_target_step, q2_target_step = q_target_steps
             q1_target = q1_target_step.value
             q2_target = q2_target_step.value
             next_q = torch.min(q1_target, q2_target)
             q_target = reward + gamma * (1 - done) * next_q
 
-        q_steps:Q_STEPS = critic_model(torch.cat([critic_observation, action], dim=-1))
+        q_steps:Q_STEPS = critic_model(critic_observation, action)
         q1_step, q2_step = q_steps
         q1 = q1_step.value
         q2 = q2_step.value
@@ -130,7 +130,7 @@ class DDPGDoubleQ:
     ) -> torch.Tensor:
         dist: DeterministicContinuousPolicyStep = actor_model(actor_observation, std)
         action = dist.pi.rsample()
-        q_steps:Q_STEPS = critic_model(torch.cat([critic_observation, action], dim=-1))
+        q_steps:Q_STEPS = critic_model(critic_observation, action)
         q1_step, q2_step = q_steps
         q1 = q1_step.value
         q2 = q2_step.value
@@ -156,7 +156,7 @@ class DDPGDoubleQ:
         actor_loss = 0
 
         for weight, critic_model in zip(weights, critic_models):
-            q_steps:Q_STEPS = critic_model(torch.cat([critic_observation, action], dim=-1))
+            q_steps:Q_STEPS = critic_model(critic_observation, action)
             q1_step, q2_step = q_steps
             q1 = q1_step.value
             q2 = q2_step.value

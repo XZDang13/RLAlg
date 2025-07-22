@@ -8,29 +8,24 @@ from ..utils import weight_init
 
 
 class MLPLayer(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
-        super(MLPLayer, self).__init__()
+    def __init__(self, in_dim: int, out_dim: int, activate_func: nn.Module = nn.ReLU(), norm: bool = False) -> None:
+        super().__init__()
         bias = not norm
         self.linear = nn.Linear(in_dim, out_dim, bias)
-        self.norm = nn.LayerNorm(out_dim) if norm else None
-
+        self.norm = nn.LayerNorm(out_dim) if norm else nn.Identity()
         self.activate_func = activate_func
 
         self.reset_parameters()
 
     def reset_parameters(self):
         weight_init(self.linear)
-        if self.norm:
+        if self.norm is not None:
             self.norm.reset_parameters()
     
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear(x)
-        if self.norm is not None:
-            x = self.norm(x)
-
-        if self.activate_func is not None:
-            x = self.activate_func(x)
-        
+        x = self.norm(x)
+        x = self.activate_func(x)
         return x
     
 class Conv1DLayer(nn.Module):
@@ -205,7 +200,7 @@ class GaussianHead(nn.Module):
             log_std = self.log_std.expand_as(mu)
             log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
 
-        std = torch.exp(log_std)
+        std = torch.exp(log_std) + 1e-7
 
         base_pi = Normal(mu, std)
         pi = TransformedDistribution(base_pi, self.transform)
@@ -295,10 +290,12 @@ class DistributeCriticHead(nn.Module):
     """
     Distributional critic head: outputs mean, std, and a sample.
     """
-    def __init__(self, feature_dim: int) -> None:
+    def __init__(self, feature_dim:int, log_std_min:float = -10, log_std_max:float = 2,) -> None:
         super().__init__()
         self.mu_layer = nn.Linear(feature_dim, 1)
         self.log_std_layer = nn.Linear(feature_dim, 1)
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -317,14 +314,15 @@ class DistributeCriticHead(nn.Module):
         Returns:
             mean, std, sampled value
         """
-        q_mu = self.mu_layer(x).squeeze(-1)
+        mu = self.mu_layer(x).squeeze(-1)
         log_std = self.log_std_layer(x).squeeze(-1)
         log_std = torch.tanh(log_std)
-        q_std = torch.exp(log_std)
-        pi = Normal(q_mu, q_std)
-        q_sample = pi.rsample()
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
+        std = torch.exp(log_std) + 1e-7
+        pi = Normal(mu, std)
+        sample = pi.rsample()
 
-        step = DistributionStep(pi, q_mu, q_std, q_sample)
+        step = DistributionStep(pi, mu, std, sample)
         return step
 
 def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
