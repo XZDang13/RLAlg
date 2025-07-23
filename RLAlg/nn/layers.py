@@ -250,7 +250,7 @@ class CategoricalHead(nn.Module):
         logits = self.logit_layer(x)
         pi = Categorical(logits=logits)
         if action is None:
-            action = pi.rsample()
+            action = pi.sample()
         log_prob = pi.log_prob(action)
         entropy = pi.entropy()
         step = DiscretePolicyStep(pi, action, log_prob, entropy)
