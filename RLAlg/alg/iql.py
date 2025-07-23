@@ -34,8 +34,8 @@ class IQL:
         return value_loss
 
     @staticmethod
-    def compute_actor_loss(
-        actor_model: nn.Module,
+    def compute_policy_loss(
+        policy_model: nn.Module,
         value_model: nn.Module,
         critic_target_model: nn.Module,
         observation: torch.Tensor,
@@ -54,13 +54,13 @@ class IQL:
             exp_a = torch.exp((q - value) * temperature)
             exp_a = torch.clamp(exp_a, max=100.0)
 
-        step:Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = actor_model(observation, action)
+        step:Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observation, action)
 
         log_prob = step.log_prob
 
-        actor_loss = -(exp_a * log_prob).mean()
+        policy_loss = -(exp_a * log_prob).mean()
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     def compute_critic_loss(

@@ -28,39 +28,39 @@ class DDPG:
         return critic_loss
 
     @staticmethod
-    def compute_actor_loss(
-        actor_model: NNMODEL,
+    def compute_policy_loss(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         observation: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        action_step: DeterministicContinuousPolicyStep = actor_model(observation)
+        action_step: DeterministicContinuousPolicyStep = policy_model(observation)
         action = action_step.mean
 
         q_value: ValueStep = critic_model(observation, action)
-        actor_loss = -q_value.value.mean()
+        policy_loss = -q_value.value.mean()
 
-        actor_loss += (action ** 2).mean() * regularization_weight
-        return actor_loss
+        policy_loss += (action ** 2).mean() * regularization_weight
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: list[NNMODEL],
         weights: list[float],
         observation: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        action_step: DeterministicContinuousPolicyStep = actor_model(observation)
+        action_step: DeterministicContinuousPolicyStep = policy_model(observation)
         action = action_step.mean
 
-        actor_loss = 0
+        policy_loss = 0
         for weight, critic_model in zip(weights, critic_models):
             q_value: ValueStep = critic_model(observation, action)
-            actor_loss += -q_value.value.mean() * weight
+            policy_loss += -q_value.value.mean() * weight
 
-        actor_loss += (action ** 2).mean() * regularization_weight
-        return actor_loss
+        policy_loss += (action ** 2).mean() * regularization_weight
+        return policy_loss
 
     @staticmethod
     def compute_critic_loss_asymmetric(
@@ -86,41 +86,41 @@ class DDPG:
         return critic_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         actor_observation: torch.Tensor,
         critic_observation: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        action_step: DeterministicContinuousPolicyStep = actor_model(actor_observation)
+        action_step: DeterministicContinuousPolicyStep = policy_model(actor_observation)
         action = action_step.mean
 
         q_value: ValueStep = critic_model(critic_observation, action)
-        actor_loss = -q_value.value.mean()
+        policy_loss = -q_value.value.mean()
 
-        actor_loss += (action ** 2).mean() * regularization_weight
-        return actor_loss
+        policy_loss += (action ** 2).mean() * regularization_weight
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: list[NNMODEL],
         weights: list[float],
         actor_observation: torch.Tensor,
         critic_observation: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        action_step: DeterministicContinuousPolicyStep = actor_model(actor_observation)
+        action_step: DeterministicContinuousPolicyStep = policy_model(actor_observation)
         action = action_step.mean
 
-        actor_loss = 0
+        policy_loss = 0
         for weight, critic_model in zip(weights, critic_models):
             q_value: ValueStep = critic_model(torch.cat([critic_observation, action], dim=-1))
-            actor_loss += -q_value.value.mean() * weight
+            policy_loss += -q_value.value.mean() * weight
 
-        actor_loss += (action ** 2).mean() * regularization_weight
-        return actor_loss
+        policy_loss += (action ** 2).mean() * regularization_weight
+        return policy_loss
 
     @staticmethod
     @torch.no_grad()

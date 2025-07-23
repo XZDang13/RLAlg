@@ -10,24 +10,24 @@ Q_STEPS = tuple[DistributionStep, DistributionStep]
 class DSAC:
 
     @staticmethod
-    def compute_actor_loss(
-        actor_model: NNMODEL,
+    def compute_policy_loss(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(observation)
+        step: StochasticContinuousPolicyStep = policy_model(observation)
 
         q1_step, q2_step = critic_model(observation, step.action)
         q1 = q1_step.mean
         q2 = q2_step.mean
         q = torch.min(q1, q2)
 
-        actor_loss = (alpha * step.log_prob - q).mean()
-        actor_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
+        policy_loss = (alpha * step.log_prob - q).mean()
+        policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     def compute_q_targ(
@@ -109,12 +109,12 @@ class DSAC:
 
     @staticmethod
     def compute_alpha_loss(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         log_alpha: torch.Tensor,
         observation: torch.Tensor,
         target_entropy: float
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(observation)
+        step: StochasticContinuousPolicyStep = policy_model(observation)
         alpha_loss = -(log_alpha.exp() * (step.log_prob + target_entropy).detach()).mean()
         return alpha_loss
 

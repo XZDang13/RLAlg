@@ -9,49 +9,49 @@ Q_STEPS = Tuple[ValueStep, ValueStep]
 
 class SAC:
     @staticmethod
-    def compute_actor_loss_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: List[NNMODEL],
         weights: List[float],
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(observation)
-        actor_loss = 0.0
+        step: StochasticContinuousPolicyStep = policy_model(observation)
+        policy_loss = 0.0
 
         for weight, critic_model in zip(weights, critic_models):
             q_steps: Q_STEPS = critic_model(observation, step.action)
             q1, q2 = q_steps[0].value, q_steps[1].value
             q = torch.min(q1, q2)
 
-            actor_loss += (alpha * step.log_prob - q).mean() * weight
+            policy_loss += (alpha * step.log_prob - q).mean() * weight
 
-        actor_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
+        policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss(
-        actor_model: NNMODEL,
+    def compute_policy_loss(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(observation)
+        step: StochasticContinuousPolicyStep = policy_model(observation)
         q_steps: Q_STEPS = critic_model(observation, step.action)
         q1, q2 = q_steps[0].value, q_steps[1].value
         q = torch.min(q1, q2)
 
-        actor_loss = (alpha * step.log_prob - q).mean()
-        actor_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
+        policy_loss = (alpha * step.log_prob - q).mean()
+        policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     def compute_critic_loss(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         critic_target_model: NNMODEL,
         observation: torch.Tensor,
@@ -66,7 +66,7 @@ class SAC:
         q1, q2 = q_steps[0].value, q_steps[1].value
 
         with torch.no_grad():
-            next_step: StochasticContinuousPolicyStep = actor_model(next_observation)
+            next_step: StochasticContinuousPolicyStep = policy_model(next_observation)
             next_q_steps: Q_STEPS = critic_target_model(next_observation, next_step.action)
             next_q1, next_q2 = next_q_steps[0].value, next_q_steps[1].value
             q_next = torch.min(next_q1, next_q2)
@@ -80,8 +80,8 @@ class SAC:
         return critic_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: List[NNMODEL],
         weights: List[float],
         actor_observation: torch.Tensor,
@@ -89,42 +89,42 @@ class SAC:
         alpha: float,
         regularization_weight: float = 0.0
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(actor_observation)
-        actor_loss = 0.0
+        step: StochasticContinuousPolicyStep = policy_model(actor_observation)
+        policy_loss = 0.0
 
         for weight, critic_model in zip(weights, critic_models):
             q_steps: Q_STEPS = critic_model(critic_observation, step.action)
             q1, q2 = q_steps[0].value, q_steps[1].value
             q = torch.min(q1, q2)
 
-            actor_loss += (alpha * step.log_prob - q).mean() * weight
+            policy_loss += (alpha * step.log_prob - q).mean() * weight
 
-        actor_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
+        policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         actor_observation: torch.Tensor,
         critic_observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(actor_observation)
+        step: StochasticContinuousPolicyStep = policy_model(actor_observation)
         q_steps: Q_STEPS = critic_model(critic_observation, step.action)
         q1, q2 = q_steps[0].value, q_steps[1].value
         q = torch.min(q1, q2)
 
-        actor_loss = (alpha * step.log_prob - q).mean()
-        actor_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
+        policy_loss = (alpha * step.log_prob - q).mean()
+        policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     def compute_critic_loss_asymmetric(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         critic_target_model: NNMODEL,
         critic_observation: torch.Tensor,
@@ -140,7 +140,7 @@ class SAC:
         q1, q2 = q_steps[0].value, q_steps[1].value
 
         with torch.no_grad():
-            next_step: StochasticContinuousPolicyStep = actor_model(next_actor_observation)
+            next_step: StochasticContinuousPolicyStep = policy_model(next_actor_observation)
             next_q_steps: Q_STEPS = critic_target_model(next_critic_observation, next_step.action)
             next_q1, next_q2 = next_q_steps[0].value, next_q_steps[1].value
             q_next = torch.min(next_q1, next_q2)
@@ -155,12 +155,12 @@ class SAC:
 
     @staticmethod
     def compute_alpha_loss(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         log_alpha: torch.Tensor,
         observation: torch.Tensor,
         target_entropy: float
     ) -> torch.Tensor:
-        step: StochasticContinuousPolicyStep = actor_model(observation)
+        step: StochasticContinuousPolicyStep = policy_model(observation)
         alpha_loss = -(log_alpha.exp() * (step.log_prob + target_entropy).detach()).mean()
         return alpha_loss
 

@@ -9,7 +9,7 @@ Q_STEPS = tuple[ValueStep, ValueStep]
 class DDPGDoubleQ:
     @staticmethod
     def compute_critic_loss(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         critic_target_model: NNMODEL,
         observation: torch.Tensor,
@@ -22,7 +22,7 @@ class DDPGDoubleQ:
     ) -> torch.Tensor:
 
         with torch.no_grad():
-            dist: DeterministicContinuousPolicyStep = actor_model(next_observation, std)
+            dist: DeterministicContinuousPolicyStep = policy_model(next_observation, std)
             next_action = dist.pi.rsample()
             q_target_steps:Q_STEPS = critic_target_model(next_observation, next_action)
             q1_target_step, q2_target_step = q_target_steps
@@ -41,14 +41,14 @@ class DDPGDoubleQ:
         return critic_loss
 
     @staticmethod
-    def compute_actor_loss(
-        actor_model: NNMODEL,
+    def compute_policy_loss(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        dist: DeterministicContinuousPolicyStep = actor_model(observation, std)
+        dist: DeterministicContinuousPolicyStep = policy_model(observation, std)
         action = dist.pi.rsample()
         q_steps:Q_STEPS = critic_model(observation, action)
         q1_step, q2_step = q_steps
@@ -56,23 +56,23 @@ class DDPGDoubleQ:
         q2 = q2_step.value
         q = torch.min(q1, q2)
 
-        actor_loss = -q.mean()
-        actor_loss += dist.mean.pow(2).mean() * regularization_weight
+        policy_loss = -q.mean()
+        policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: list[NNMODEL],
         weights: list[float],
         observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        dist: DeterministicContinuousPolicyStep = actor_model(observation, std)
+        dist: DeterministicContinuousPolicyStep = policy_model(observation, std)
         action = dist.pi.rsample()
-        actor_loss = 0
+        policy_loss = 0
 
         for weight, critic_model in zip(weights, critic_models):
             q_steps:Q_STEPS = critic_model(observation, action)
@@ -80,15 +80,15 @@ class DDPGDoubleQ:
             q1 = q1_step.value
             q2 = q2_step.value
             q = torch.min(q1, q2)
-            actor_loss += -q.mean() * weight
+            policy_loss += -q.mean() * weight
 
-        actor_loss += dist.mean.pow(2).mean() * regularization_weight
+        policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     def compute_critic_loss_asymmetric(
-        actor_model: NNMODEL,
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         critic_target_model: NNMODEL,
         critic_observation: torch.Tensor,
@@ -101,7 +101,7 @@ class DDPGDoubleQ:
         gamma: float = 0.99,
     ) -> torch.Tensor:
         with torch.no_grad():
-            dist: DeterministicContinuousPolicyStep = actor_model(next_actor_observation, std)
+            dist: DeterministicContinuousPolicyStep = policy_model(next_actor_observation, std)
             next_action = dist.pi.rsample()
             q_target_steps:Q_STEPS = critic_target_model(next_critic_observation, next_action)
             q1_target_step, q2_target_step = q_target_steps
@@ -120,15 +120,15 @@ class DDPGDoubleQ:
         return critic_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric(
+        policy_model: NNMODEL,
         critic_model: NNMODEL,
         actor_observation: torch.Tensor,
         critic_observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        dist: DeterministicContinuousPolicyStep = actor_model(actor_observation, std)
+        dist: DeterministicContinuousPolicyStep = policy_model(actor_observation, std)
         action = dist.pi.rsample()
         q_steps:Q_STEPS = critic_model(critic_observation, action)
         q1_step, q2_step = q_steps
@@ -136,14 +136,14 @@ class DDPGDoubleQ:
         q2 = q2_step.value
         q = torch.min(q1, q2)
 
-        actor_loss = -q.mean()
-        actor_loss += dist.mean.pow(2).mean() * regularization_weight
+        policy_loss = -q.mean()
+        policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
-    def compute_actor_loss_asymmetric_with_multi_critic(
-        actor_model: NNMODEL,
+    def compute_policy_loss_asymmetric_with_multi_critic(
+        policy_model: NNMODEL,
         critic_models: list[NNMODEL],
         weights: list[float],
         actor_observation: torch.Tensor,
@@ -151,9 +151,9 @@ class DDPGDoubleQ:
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> torch.Tensor:
-        dist: DeterministicContinuousPolicyStep = actor_model(actor_observation, std)
+        dist: DeterministicContinuousPolicyStep = policy_model(actor_observation, std)
         action = dist.pi.rsample()
-        actor_loss = 0
+        policy_loss = 0
 
         for weight, critic_model in zip(weights, critic_models):
             q_steps:Q_STEPS = critic_model(critic_observation, action)
@@ -161,11 +161,11 @@ class DDPGDoubleQ:
             q1 = q1_step.value
             q2 = q2_step.value
             q = torch.min(q1, q2)
-            actor_loss += -q.mean() * weight
+            policy_loss += -q.mean() * weight
 
-        actor_loss += dist.mean.pow(2).mean() * regularization_weight
+        policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return actor_loss
+        return policy_loss
 
     @staticmethod
     @torch.no_grad()
