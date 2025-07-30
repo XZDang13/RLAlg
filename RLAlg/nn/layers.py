@@ -137,7 +137,7 @@ class GaussianHead(nn.Module):
         self,
         feature_dim: int,
         action_dim: int,
-        log_std_min: float = -10,
+        log_std_min: float = -20,
         log_std_max: float = 2,
         max_action: Union[float,torch.Tensor, None] = None,
         state_dependent_std: bool = False,
@@ -206,7 +206,7 @@ class GaussianHead(nn.Module):
             log_std = self.log_std.expand_as(mu)
             log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
 
-        std = torch.exp(log_std) + 1e-7
+        std = torch.exp(log_std)
 
         base_pi = Normal(mu, std)
         pi = TransformedDistribution(base_pi, self.transform)
@@ -219,7 +219,8 @@ class GaussianHead(nn.Module):
         # deterministic mu after squashing if needed
         if self.max_action is not None:
             mu_squashed = self.max_action * torch.tanh(mu)
-            entropy = -log_prob
+            #entropy = -log_prob
+            entropy = pi.base_dist.entropy()
         else:
             mu_squashed = mu
             entropy = pi.base_dist.entropy()
