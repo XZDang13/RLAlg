@@ -2,7 +2,7 @@ from typing import Callable, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, Categorical, TanhTransform, AffineTransform, TransformedDistribution
+from torch.distributions import Normal, Categorical, TanhTransform, AffineTransform, TransformedDistribution, ComposeTransform
 from .steps import DiscretePolicyStep, StochasticContinuousPolicyStep, DeterministicContinuousPolicyStep, ValueStep, DistributionStep
 from ..utils import weight_init
 
@@ -92,10 +92,13 @@ class DeterministicHead(nn.Module):
         self.max_action = max_action
 
         if self.max_action is not None:
-            self.transform = [
-                TanhTransform(cache_size=1),
-                AffineTransform(loc=0, scale=max_action)
-            ]
+            self.transform = ComposeTransform(
+                [
+                    TanhTransform(),
+                    AffineTransform(loc=0, scale=max_action)
+                ],
+                cache_size=1
+            )
         else:
             self.transform = []
 
@@ -154,10 +157,13 @@ class GaussianHead(nn.Module):
         self.max_action = max_action
 
         if self.max_action is not None:
-            self.transform = [
-                TanhTransform(cache_size=1),
-                AffineTransform(loc=0, scale=max_action)
-            ]
+            self.transform = ComposeTransform(
+                [
+                    TanhTransform(),
+                    AffineTransform(loc=0, scale=max_action)
+                ],
+                cache_size=1
+            )
         else:
             self.transform = []
 
