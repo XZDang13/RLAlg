@@ -159,10 +159,9 @@ class GaussianHead(nn.Module):
         if self.max_action is not None:
             self.transform = ComposeTransform(
                 [
-                    TanhTransform(),
-                    AffineTransform(loc=0, scale=max_action)
+                    TanhTransform(cache_size=1),
+                    AffineTransform(loc=0, scale=max_action, cache_size=1)
                 ],
-                cache_size=1
             )
         else:
             self.transform = []
@@ -213,6 +212,10 @@ class GaussianHead(nn.Module):
 
         if action is None:
             action = pi.rsample()
+            
+        if self.max_action is not None:
+            eps = 1e-6
+            action = action.clamp(-self.max_action + eps, self.max_action - eps)
 
         log_prob = pi.log_prob(action).sum(axis=-1)
 
