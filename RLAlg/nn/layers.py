@@ -159,9 +159,10 @@ class GaussianHead(nn.Module):
         if self.max_action is not None:
             self.transform = ComposeTransform(
                 [
-                    TanhTransform(cache_size=1),
-                    AffineTransform(loc=0, scale=max_action, cache_size=1)
+                    TanhTransform(),
+                    AffineTransform(loc=0, scale=max_action)
                 ],
+                cache_size=1
             )
         else:
             self.transform = []
