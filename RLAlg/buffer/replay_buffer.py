@@ -1,10 +1,22 @@
 from typing import Generator
 import os
 import torch
-from torch import Tensor
 
-def compute_advantage(rewards, values, dones, gamma: float = 0.99) -> None:
-    
+def compute_returns(rewards:torch.Tensor, dones:torch.Tensor, gamma: float = 0.99) -> torch.Tensor:
+    steps, num_envs = rewards.size(0), rewards.size(1)
+
+    returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
+    next_return = torch.zeros(num_envs, dtype=rewards.dtype, device=rewards.device)
+    for step in reversed(range(steps)):
+        next_return = rewards[step] + gamma * next_return * (1.0 - dones[step])
+        returns[step] = next_return
+        
+    return returns
+
+def compute_advantage(rewards:torch.Tensor,
+                      values:torch.Tensor,
+                      dones:torch.Tensor,
+                      gamma: float = 0.99) -> tuple[torch.Tensor, torch.Tensor]:
     steps, num_envs = rewards.size(0), rewards.size(1)
 
     returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
@@ -21,7 +33,11 @@ def compute_advantage(rewards, values, dones, gamma: float = 0.99) -> None:
 
     return returns, advantages
 
-def compute_gae(rewards, values, dones, last_values: Tensor, gamma: float = 0.99, lambda_: float = 0.95) -> None:
+def compute_gae(rewards:torch.Tensor,
+                values:torch.Tensor,
+                dones:torch.Tensor,
+                last_values: torch.Tensor,
+                gamma: float = 0.99, lambda_: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
     steps, num_envs = rewards.size(0), rewards.size(1)
 
     returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
@@ -46,7 +62,7 @@ class ReplayBuffer:
         self.num_envs = num_envs
         self.steps = steps
         self.device = device
-        self.data: dict[str, Tensor] = {}
+        self.data: dict[str, torch.Tensor] = {}
 
         self.step = 0
         self.current_size = 0
@@ -60,7 +76,7 @@ class ReplayBuffer:
     def create_storage_space(self, key_name: str, data_shape: tuple[int]=(), dtype: torch.dtype=torch.float32) -> None:
         self.data[key_name] = torch.zeros((self.steps, self.num_envs, *data_shape), dtype=dtype, device=self.device)
 
-    def add_storage(self, key_name: str, values: Tensor) -> None:
+    def add_storage(self, key_name: str, values: torch.Tensor) -> None:
         self.data[key_name] = values.to(self.device)
 
     def add_records(self, record: dict[str, any]) -> None:
@@ -76,7 +92,7 @@ class ReplayBuffer:
         self.step = (self.step + 1) % self.steps
         self.current_size = min(self.current_size + 1, self.steps)
 
-    def sample_batchs(self, key_names:list[str], batch_size: int) -> Generator[dict[str, Tensor], None, None]:
+    def sample_batchs(self, key_names:list[str], batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
         total = self.steps * self.num_envs
         indices = torch.randperm(total, device=self.device)
 
@@ -90,7 +106,7 @@ class ReplayBuffer:
             idx = indices[start:start + batch_size]
             yield {key: value[idx] for key, value in batch.items()}
 
-    def sample_batch(self, key_names:list[str], batch_size: int) -> dict[str, Tensor]:
+    def sample_batch(self, key_names:list[str], batch_size: int) -> dict[str, torch.Tensor]:
         total = self.current_size * self.num_envs
         indices = torch.randint(0, total, (batch_size,), device=self.device)
 
