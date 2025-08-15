@@ -64,14 +64,17 @@ class ReplayBuffer:
         self.data[key_name] = values.to(self.device)
 
     def add_records(self, record: dict[str, any]) -> None:
-        self.step = (self.step + 1) % self.steps
-        self.current_size = min(self.current_size + 1, self.steps)
-
+        idx = self.step  # write at current step
         for key, value in record.items():
             assert key in self.data, f"Key '{key}' not found in buffer."
-            if not isinstance(value, torch.Tensor):
-                value = torch.as_tensor(value, dtype=self.data[key].dtype)
-            self.data[key][self.step] = value.to(self.device)
+            value = torch.as_tensor(value).detach().to(
+                device=self.device, dtype=self.data[key].dtype
+            )
+            self.data[key][idx] = value
+
+        # advance pointer & size
+        self.step = (self.step + 1) % self.steps
+        self.current_size = min(self.current_size + 1, self.steps)
 
     def sample_batchs(self, key_names:list[str], batch_size: int) -> Generator[dict[str, Tensor], None, None]:
         total = self.steps * self.num_envs
