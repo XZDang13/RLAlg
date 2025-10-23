@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 def _to_logits(x):
     return getattr(x, "value", x)
 
-class DiscriminatorAlg:
+class GAN:
     @staticmethod
     def compute_bce_loss(
         discriminator,
