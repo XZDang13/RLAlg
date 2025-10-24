@@ -19,7 +19,7 @@ class MLPLayer(nn.Module):
 
     def reset_parameters(self):
         weight_init(self.linear)
-        if self.norm is not None:
+        if not isinstance(self.norm, nn.Identity):
             self.norm.reset_parameters()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -30,11 +30,11 @@ class MLPLayer(nn.Module):
     
 class Conv1DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func: nn.Module = nn.ReLU(), norm:bool=False) -> None:
         super(Conv1DLayer, self).__init__()
         bias = not norm
         self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
-        self.norm = nn.InstanceNorm1d(out_channel) if norm else None
+        self.norm = nn.InstanceNorm1d(out_channel) if norm else nn.Identity()
 
         self.activate_func = activate_func
 
@@ -42,26 +42,23 @@ class Conv1DLayer(nn.Module):
 
     def reset_parameters(self):
         weight_init(self.conv1d)
-        if self.norm:
+        if not isinstance(self.norm, nn.Identity):
             self.norm.reset_parameters()
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.conv1d(x)
-        if self.norm is not None:
-            x = self.norm(x)
-
-        if self.activate_func is not None:
-            x = self.activate_func(x)
+        x = self.norm(x)
+        x = self.activate_func(x)
         
         return x
     
 class Conv2DLayer(nn.Module):
     def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func:Callable[[torch.Tensor], torch.Tensor]=F.relu, norm:bool=False) -> None:
+                 padding:int=1, activate_func: nn.Module = nn.ReLU(), norm:bool=False) -> None:
         super(Conv2DLayer, self).__init__()
         bias = not norm
         self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
-        self.norm = nn.InstanceNorm2d(out_channel) if norm else None
+        self.norm = nn.InstanceNorm2d(out_channel) if norm else nn.Identity()
 
         self.activate_func = activate_func
 
@@ -69,16 +66,13 @@ class Conv2DLayer(nn.Module):
 
     def reset_parameters(self):
         weight_init(self.conv2d)
-        if self.norm:
+        if not isinstance(self.norm, nn.Identity):
             self.norm.reset_parameters()
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.conv2d(x)
-        if self.norm is not None:
-            x = self.norm(x)
-
-        if self.activate_func is not None:
-            x = self.activate_func(x)
+        x = self.norm(x)
+        x = self.activate_func(x)
         
         return x
     
