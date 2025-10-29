@@ -1,4 +1,4 @@
-from typing import Generator
+from typing import Generator, Any
 import os
 import torch
 
@@ -79,8 +79,8 @@ class ReplayBuffer:
     def add_storage(self, key_name: str, values: torch.Tensor) -> None:
         self.data[key_name] = values.to(self.device)
 
-    def add_records(self, record: dict[str, any]) -> None:
-        idx = self.step  # write at current step
+    def add_records(self, record: dict[str, Any]) -> None:
+        idx = self.step
         for key, value in record.items():
             assert key in self.data, f"Key '{key}' not found in buffer."
             value = torch.as_tensor(value).detach().to(
@@ -88,7 +88,6 @@ class ReplayBuffer:
             )
             self.data[key][idx] = value
 
-        # advance pointer & size
         self.step = (self.step + 1) % self.steps
         self.current_size = min(self.current_size + 1, self.steps)
 
@@ -99,7 +98,6 @@ class ReplayBuffer:
         batch = {}
         for key in key_names:
             data = self.data[key]
-
             batch[key] = data.view(total, *data.shape[2:])
 
         for start in range(0, total, batch_size):
@@ -113,10 +111,9 @@ class ReplayBuffer:
         batch = {}
         for key in key_names:
             data = self.data[key]
-            shape = data.shape[2:]  # drop (T, N)
+            shape = data.shape[2:]
             flat = data[:self.current_size].reshape(total, *shape)
             batch[key] = flat[indices]
-
         return batch
         
     def sample_tensor(self, key_name:str, batch_size: int) -> torch.Tensor:
@@ -126,3 +123,28 @@ class ReplayBuffer:
         shape = data.shape[2:]
         flat = data[:self.current_size].reshape(total, *shape)
         return flat[indices]
+
+    # ---------------- SAVE & LOAD ---------------- #
+
+    def save(self, path: str) -> None:
+        """Save replay buffer to a file."""
+        save_dict = {
+            "num_envs": self.num_envs,
+            "steps": self.steps,
+            "step": self.step,
+            "current_size": self.current_size,
+            "data": {k: v.cpu() for k, v in self.data.items()},
+        }
+        torch.save(save_dict, path)
+        print(f"[ReplayBuffer] Saved buffer to '{path}'")
+
+    def load(self, path: str, device: torch.device | None = None) -> None:
+        """Load replay buffer from a file."""
+        checkpoint = torch.load(path, map_location=device or self.device)
+        self.num_envs = checkpoint["num_envs"]
+        self.steps = checkpoint["steps"]
+        self.step = checkpoint["step"]
+        self.current_size = checkpoint["current_size"]
+        self.data = {k: v.to(device or self.device) for k, v in checkpoint["data"].items()}
+        self.device = device or self.device
+        print(f"[ReplayBuffer] Loaded buffer from '{path}' to device '{self.device}'")

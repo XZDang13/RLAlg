@@ -12,19 +12,54 @@ from typing import Dict, Any, Optional
 
 class GAN:
     @staticmethod
+    def compute_gradient(inputs:torch.Tensor, outputs:torch.Tensor):
+
+        grad = torch.autograd.grad(
+            outputs=outputs.sum(),
+            inputs=inputs,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )[0]
+        
+
+        return grad
+    
+    @staticmethod
+    def compute_r1_gradient_penalty(inputs:torch.Tensor, outputs:torch.Tensor, gamma:float):
+        grads = GAN.compute_gradient(inputs, outputs)
+        grads = grads.view(inputs.size(0), -1)
+        grad_sq = grads.pow(2).sum(dim=1)
+        gp = 0.5 * gamma * grad_sq.mean()
+
+        return gp
+    
+    @staticmethod
+    def compute_wp_gradient_penalty(inputs:torch.Tensor, outputs:torch.Tensor, lambda_gp:float, gp_center:float):
+        grads = GAN.compute_gradient(inputs, outputs)
+        grads = grads.view(inputs.size(0), -1)
+        grad_norm = grads.norm(2, dim=1)
+        gp = lambda_gp * ((grad_norm - gp_center) ** 2).mean()
+
+        return gp
+
+    @staticmethod
     def compute_bce_loss(
         discriminator,
         real_data: torch.Tensor,
         fake_data: torch.Tensor,
         detach_fake: bool = True,
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
-    ) -> Dict[str, Any]:
+    ) -> torch.Tensor:
         """
         Logistic/BCE loss for the discriminator (a.k.a. non-saturating loss).
         Uses a numerically stable softplus form. Optionally applies R1 penalty.
         """
         if detach_fake:
             fake_data = fake_data.detach()
+
+        if r1_gamma != 0:
+            real_data.requires_grad_(True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -42,23 +77,9 @@ class GAN:
         loss_fake = F.binary_cross_entropy_with_logits(logits_fake, fake_label).mean()
 
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
-        loss_r1 = torch.tensor(0.0, device=real_data.device)
+        loss_r1 = 0
         if r1_gamma > 0.0:
-            real_data = real_data.detach().requires_grad_(True)
-            logits_real_r1 = discriminator(real_data)
-            if isinstance(logits_real_r1, ValueStep):
-                logits_real_r1 = logits_real_r1.value
-
-            grad_real = torch.autograd.grad(
-                outputs=logits_real_r1.sum(),
-                inputs=real_data,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-            grad_real = grad_real.view(grad_real.size(0), -1)
-            r1 = (grad_real.pow(2).sum(dim=1)).mean()
-            loss_r1 = (r1_gamma * 0.5) * r1
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -72,13 +93,16 @@ class GAN:
         detach_fake: bool = True,
         label_smoothing: float = 0.0,  # e.g., 0.1 -> real=0.9, fake=0.1
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
-    ) -> Dict[str, Any]:
+    ) -> torch.Tensor:
         """
         Logistic/BCE loss for the discriminator (a.k.a. non-saturating loss).
         Uses a numerically stable softplus form. Optionally applies R1 penalty.
         """
         if detach_fake:
             fake_data = fake_data.detach()
+
+        if r1_gamma != 0:
+            real_data.requires_grad_(True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -105,23 +129,9 @@ class GAN:
             loss_fake = (1 - eps) * loss_fake + eps * F.softplus(-logits_fake).mean()
 
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
-        loss_r1 = torch.tensor(0.0, device=real_data.device)
+        loss_r1 = 0
         if r1_gamma > 0.0:
-            real_data = real_data.detach().requires_grad_(True)
-            logits_real_r1 = discriminator(real_data)
-            if isinstance(logits_real_r1, ValueStep):
-                logits_real_r1 = logits_real_r1.value
-
-            grad_real = torch.autograd.grad(
-                outputs=logits_real_r1.sum(),
-                inputs=real_data,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-            grad_real = grad_real.view(grad_real.size(0), -1)
-            r1 = (grad_real.pow(2).sum(dim=1)).mean()
-            loss_r1 = (r1_gamma * 0.5) * r1
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -143,6 +153,9 @@ class GAN:
         if detach_fake:
             fake_data = fake_data.detach()
 
+        if r1_gamma != 0:
+            real_data.requires_grad_(True)
+
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
 
@@ -154,24 +167,10 @@ class GAN:
 
         loss_real = F.relu(1 - logits_real).mean()
         loss_fake = F.relu(1 + logits_fake).mean()
-        loss_r1 = torch.tensor(0.0, device=real_data.device)
 
+        loss_r1 = 0
         if r1_gamma > 0.0:
-            real_data_r1 = real_data.detach().requires_grad_(True)
-            d_real_r1 = discriminator(real_data_r1)
-            if isinstance(d_real_r1, ValueStep):
-                d_real_r1 = d_real_r1.value
-
-            grad_real = torch.autograd.grad(
-                outputs=d_real_r1.sum(),
-                inputs=real_data_r1,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-            grad_real = grad_real.view(grad_real.size(0), -1)
-            r1 = (grad_real.pow(2).sum(dim=1)).mean()
-            loss_r1 = (r1_gamma * 0.5) * r1
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
 
         total = loss_real + loss_fake + loss_r1
         return total
@@ -195,6 +194,9 @@ class GAN:
         if detach_fake:
             fake_data = fake_data.detach()
 
+        if r1_gamma != 0:
+            real_data.requires_grad_(True)
+
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
 
@@ -208,24 +210,10 @@ class GAN:
         # Mean squared error to targets
         loss_real = 0.5 * (logits_real - real_target).pow(2).mean()
         loss_fake = 0.5 * (logits_fake - fake_target).pow(2).mean()
-        loss_r1 = torch.tensor(0.0, device=real_data.device)
 
-        # Optional R1 regularizer on real samples
+        loss_r1 = 0
         if r1_gamma > 0.0:
-            real_data_r1 = real_data.detach().requires_grad_(True)
-            d_real_r1 = discriminator(real_data_r1)
-            if isinstance(d_real_r1, ValueStep):
-                d_real_r1 = d_real_r1.value
-            grad_real = torch.autograd.grad(
-                outputs=d_real_r1.sum(),
-                inputs=real_data_r1,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-            grad_real = grad_real.view(grad_real.size(0), -1)
-            r1 = (grad_real.pow(2).sum(dim=1)).mean()
-            loss_r1 = (r1_gamma * 0.5) * r1
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
 
         total = loss_real + loss_fake + loss_r1
         return total
@@ -245,6 +233,9 @@ class GAN:
         """
         if detach_fake:
             fake_data = fake_data.detach()
+
+        if lambda_gp != 0:
+            real_data.requires_grad_(True)
 
         device = real_data.device
 
@@ -270,22 +261,7 @@ class GAN:
         if isinstance(d_hat, ValueStep):
             d_hat = d_hat.value
 
-        # grad_outputs should match d_hat's device/dtype/shape
-        grad_outputs = torch.ones_like(d_hat)
-
-        grads = torch.autograd.grad(
-            outputs=d_hat,
-            inputs=x_hat,
-            grad_outputs=grad_outputs,
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-
-        grads = grads.view(bsz, -1)
-        grad_norm = grads.norm(2, dim=1)
-        gp = (grad_norm - gp_center).pow(2).mean()
-        loss_gp = lambda_gp * gp
+        loss_gp = GAN.compute_wp_gradient_penalty(x_hat, d_hat, lambda_gp, gp_center)
 
         return loss_wgan + loss_gp
     
@@ -293,7 +269,7 @@ class GAN:
     def compute_generator_softplus_loss(
         discriminator,
         fake_data: torch.Tensor,
-    ) -> Dict[str, Any]:
+    ) -> torch.Tensor:
         logits_fake = discriminator(fake_data)
 
         if isinstance(logits_fake, ValueStep):
@@ -307,7 +283,7 @@ class GAN:
     def compute_generator_mean_loss(
         discriminator,
         fake_data: torch.Tensor,
-    ) -> Dict[str, Any]:
+    ) -> torch.Tensor:
         logits_fake = discriminator(fake_data)
 
         if isinstance(logits_fake, ValueStep):
@@ -321,7 +297,7 @@ class GAN:
     def compute_generator_ls_loss(
         discriminator,
         fake_data: torch.Tensor,
-    ) -> Dict[str, Any]:
+    ) -> torch.Tensor:
         logits_fake = discriminator(fake_data)
 
         if isinstance(logits_fake, ValueStep):
