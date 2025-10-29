@@ -17,6 +17,59 @@ class GAN:
         real_data: torch.Tensor,
         fake_data: torch.Tensor,
         detach_fake: bool = True,
+        r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
+    ) -> Dict[str, Any]:
+        """
+        Logistic/BCE loss for the discriminator (a.k.a. non-saturating loss).
+        Uses a numerically stable softplus form. Optionally applies R1 penalty.
+        """
+        if detach_fake:
+            fake_data = fake_data.detach()
+
+        logits_real = discriminator(real_data)
+        logits_fake = discriminator(fake_data)
+
+        if isinstance(logits_real, ValueStep):
+            logits_real = logits_real.value
+            
+        if isinstance(logits_fake, ValueStep):
+            logits_fake = logits_fake.value
+
+        true_label = torch.ones_like(logits_real, device=logits_real.device)
+        fake_label = torch.zeros_like(logits_fake, device=logits_fake.device)
+
+        loss_real = F.binary_cross_entropy_with_logits(logits_real, true_label).mean()
+        loss_fake = F.binary_cross_entropy_with_logits(logits_fake, fake_label).mean()
+
+        # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
+        loss_r1 = torch.tensor(0.0, device=real_data.device)
+        if r1_gamma > 0.0:
+            real_data = real_data.detach().requires_grad_(True)
+            logits_real_r1 = discriminator(real_data)
+            if isinstance(logits_real_r1, ValueStep):
+                logits_real_r1 = logits_real_r1.value
+
+            grad_real = torch.autograd.grad(
+                outputs=logits_real_r1.sum(),
+                inputs=real_data,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]
+            grad_real = grad_real.view(grad_real.size(0), -1)
+            r1 = (grad_real.pow(2).sum(dim=1)).mean()
+            loss_r1 = (r1_gamma * 0.5) * r1
+
+        total = loss_real + loss_fake + loss_r1
+
+        return total
+    
+    @staticmethod
+    def compute_soft_bce_loss(
+        discriminator,
+        real_data: torch.Tensor,
+        fake_data: torch.Tensor,
+        detach_fake: bool = True,
         label_smoothing: float = 0.0,  # e.g., 0.1 -> real=0.9, fake=0.1
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
     ) -> Dict[str, Any]:

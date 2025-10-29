@@ -118,3 +118,11 @@ class ReplayBuffer:
             batch[key] = flat[indices]
 
         return batch
+        
+    def sample_tensor(self, key_name:str, batch_size: int) -> torch.Tensor:
+        data = self.data[key_name]
+        total = self.current_size * self.num_envs
+        indices = torch.randint(0, total, (batch_size,), device=self.device)
+        shape = data.shape[2:]
+        flat = data[:self.current_size].reshape(total, *shape)
+        return flat[indices]
