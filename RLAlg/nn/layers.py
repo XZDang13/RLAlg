@@ -131,6 +131,7 @@ class GaussianHead(nn.Module):
         self,
         feature_dim: int,
         action_dim: int,
+        log_std:float = 0,
         log_std_min: float = -20,
         log_std_max: float = 2,
         max_action: Union[float,torch.Tensor, None] = None,
@@ -144,7 +145,7 @@ class GaussianHead(nn.Module):
         if state_dependent_std:
             self.log_std_layer = nn.Linear(feature_dim, action_dim)
         else:
-            self.log_std = nn.Parameter(torch.zeros(action_dim))
+            self.log_std = nn.Parameter(torch.ones(action_dim)*log_std)
 
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
