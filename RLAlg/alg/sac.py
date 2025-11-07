@@ -16,7 +16,7 @@ class SAC:
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)
         policy_loss = 0.0
 
@@ -29,7 +29,9 @@ class SAC:
 
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_policy_loss(
@@ -38,7 +40,7 @@ class SAC:
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)
         q_steps: Q_STEPS = critic_model(observation, step.action)
         q1, q2 = q_steps[0].value, q_steps[1].value
@@ -47,7 +49,9 @@ class SAC:
         policy_loss = (alpha * step.log_prob - q).mean()
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_critic_loss(
@@ -61,7 +65,7 @@ class SAC:
         done: torch.Tensor,
         alpha: float,
         gamma: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         q_steps: Q_STEPS = critic_model(observation, action)
         q1, q2 = q_steps[0].value, q_steps[1].value
 
@@ -77,7 +81,12 @@ class SAC:
         critic_2_loss = 0.5 * ((q_targ - q2) ** 2).mean()
         critic_loss = critic_1_loss + critic_2_loss
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q_target": q_targ.mean()
+        }
 
     @staticmethod
     def compute_policy_loss_asymmetric_with_multi_critic(
@@ -88,7 +97,7 @@ class SAC:
         critic_observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(actor_observation)
         policy_loss = 0.0
 
@@ -101,7 +110,9 @@ class SAC:
 
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_policy_loss_asymmetric(
@@ -111,7 +122,7 @@ class SAC:
         critic_observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(actor_observation)
         q_steps: Q_STEPS = critic_model(critic_observation, step.action)
         q1, q2 = q_steps[0].value, q_steps[1].value
@@ -120,7 +131,9 @@ class SAC:
         policy_loss = (alpha * step.log_prob - q).mean()
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_critic_loss_asymmetric(
@@ -135,7 +148,7 @@ class SAC:
         done: torch.Tensor,
         alpha: float,
         gamma: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         q_steps: Q_STEPS = critic_model(critic_observation, action)
         q1, q2 = q_steps[0].value, q_steps[1].value
 
@@ -151,7 +164,12 @@ class SAC:
         critic_2_loss = 0.5 * ((q_targ - q2) ** 2).mean()
         critic_loss = critic_1_loss + critic_2_loss
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q_target": q_targ.mean()
+        }
 
     @staticmethod
     def compute_alpha_loss(
@@ -159,10 +177,12 @@ class SAC:
         log_alpha: torch.Tensor,
         observation: torch.Tensor,
         target_entropy: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)
         alpha_loss = -(log_alpha.exp() * (step.log_prob + target_entropy).detach()).mean()
-        return alpha_loss
+        return {
+            "alpha_loss": alpha_loss
+        }
 
     @staticmethod
     @torch.no_grad()

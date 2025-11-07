@@ -27,13 +27,11 @@ class PPO:
         weights: list[float],
         clip_ratio: float,
         regularization_weight: float = 0.0
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
 
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
         entropy = step.entropy.mean()
-
-        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
 
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
@@ -45,7 +43,13 @@ class PPO:
         if isinstance(step, StochasticContinuousPolicyStep):
             loss += step.mean.pow(2).mean() * regularization_weight
 
-        return loss, entropy, kl_divergence
+        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
+
+        return {
+            "loss": loss,
+            "entropy": entropy,
+            "kl_divergence": kl_divergence
+        }
 
     @staticmethod
     def compute_policy_loss(
@@ -56,13 +60,11 @@ class PPO:
         advantages: torch.Tensor,
         clip_ratio: float,
         regularization_weight: float = 0.0
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
 
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
         entropy = step.entropy.mean()
-
-        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
 
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
@@ -72,18 +74,26 @@ class PPO:
         if isinstance(step, StochasticContinuousPolicyStep):
             loss += step.mean.pow(2).mean() * regularization_weight
 
-        return loss, entropy, kl_divergence
+        kl_divergence = PPO.compute_kl_divergence(log_probs, log_probs_hat)
+
+        return {
+            "loss": loss,
+            "entropy": entropy,
+            "kl_divergence": kl_divergence
+        }
 
     @staticmethod
     def compute_value_loss(
         value_model: NNMODEL,
         observations: torch.Tensor,
         returns: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: ValueStep = value_model(observations)
         values = step.value
         loss = 0.5 * ((returns - values) ** 2).mean()
-        return loss
+        return {
+            "loss": loss
+        }
 
     @staticmethod
     def compute_clipped_value_loss(
@@ -92,9 +102,9 @@ class PPO:
         values_hat: torch.Tensor,
         returns: torch.Tensor,
         clip_ratio: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: ValueStep = value_model(observations)
-        values = step.value.squeeze()
+        values = step.value
 
         loss_unclipped = 0.5 * (returns - values) ** 2
 
@@ -102,4 +112,8 @@ class PPO:
         loss_clipped = 0.5 * (returns - values_clipped) ** 2
 
         loss = torch.max(loss_unclipped, loss_clipped)
-        return loss.mean()
+        loss = loss.mean()
+
+        return {
+            "loss": loss
+        }

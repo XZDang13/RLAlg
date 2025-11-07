@@ -18,7 +18,7 @@ class DSACT:
         observation: torch.Tensor,
         alpha: float,
         regularization_weight: float = 0.0
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)
 
         q_steps: Q_STEPS = critic_model(observation, step.action)
@@ -30,7 +30,9 @@ class DSACT:
         policy_loss = (alpha * step.log_prob - q).mean()
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_q_targ(
@@ -83,7 +85,7 @@ class DSACT:
         alpha: float,
         gamma: float,
         tau_b: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
 
         q_steps: Q_STEPS = critic_model(observation, action)
         q1, q2 = q_steps[0].mean, q_steps[1].mean
@@ -126,7 +128,15 @@ class DSACT:
 
         critic_loss = critic_1_loss + critic_2_loss
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q1_target": q1_targ.mean(),
+            "q1_target_bound": q1_targ_bound.mean(),
+            "q2_target": q2_targ.mean(),
+            "q2_target_bound": q2_targ_bound.mean()
+        }
 
     @staticmethod
     def compute_alpha_loss(
@@ -134,10 +144,12 @@ class DSACT:
         log_alpha: torch.Tensor,
         observation: torch.Tensor,
         target_entropy: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)
         alpha_loss = -(log_alpha.exp() * (step.log_prob + target_entropy).detach()).mean()
-        return alpha_loss
+        return {
+            "alpha_loss": alpha_loss
+        }
 
     @staticmethod
     @torch.no_grad()

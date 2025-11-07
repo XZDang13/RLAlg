@@ -18,7 +18,7 @@ class IQL:
         observation: torch.Tensor,
         action: torch.Tensor,
         expectile: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             q_steps: Q_STEPS = critic_target_model(observation, action)
             q1 = q_steps[0].value
@@ -31,7 +31,9 @@ class IQL:
         diff = q - value
         value_loss = asymmetric_l2_loss(diff, expectile)
 
-        return value_loss
+        return {
+            "loss": value_loss
+        }
 
     @staticmethod
     def compute_policy_loss(
@@ -41,7 +43,7 @@ class IQL:
         observation: torch.Tensor,
         action: torch.Tensor,
         temperature: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             value_step: ValueStep = value_model(observation)
             value = value_step.value
@@ -60,7 +62,9 @@ class IQL:
 
         policy_loss = -(exp_a * log_prob).mean()
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_critic_loss(
@@ -72,7 +76,7 @@ class IQL:
         done: torch.Tensor,
         next_observation: torch.Tensor,
         gamma: float
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             next_value_step: ValueStep = value_model(next_observation)
             next_value = next_value_step.value
@@ -86,7 +90,12 @@ class IQL:
         critic_2_loss = ((q2 - q_targ) ** 2).mean()
         critic_loss = critic_1_loss + critic_2_loss
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q_target": q_targ.mean()
+        }
 
     @staticmethod
     @torch.no_grad()

@@ -19,7 +19,7 @@ class DDPGDoubleQ:
         done: torch.Tensor,
         std: torch.Tensor,
         gamma: float = 0.99,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
 
         with torch.no_grad():
             dist: DeterministicContinuousPolicyStep = policy_model(next_observation, std)
@@ -38,7 +38,12 @@ class DDPGDoubleQ:
 
         critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q_target": q_target.mean()
+        }
 
     @staticmethod
     def compute_policy_loss(
@@ -47,7 +52,7 @@ class DDPGDoubleQ:
         observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         dist: DeterministicContinuousPolicyStep = policy_model(observation, std)
         action = dist.pi.rsample()
         q_steps:Q_STEPS = critic_model(observation, action)
@@ -59,7 +64,9 @@ class DDPGDoubleQ:
         policy_loss = -q.mean()
         policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_policy_loss_with_multi_critic(
@@ -69,7 +76,7 @@ class DDPGDoubleQ:
         observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         dist: DeterministicContinuousPolicyStep = policy_model(observation, std)
         action = dist.pi.rsample()
         policy_loss = 0
@@ -84,7 +91,9 @@ class DDPGDoubleQ:
 
         policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_critic_loss_asymmetric(
@@ -99,7 +108,7 @@ class DDPGDoubleQ:
         done: torch.Tensor,
         std: torch.Tensor,
         gamma: float = 0.99,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             dist: DeterministicContinuousPolicyStep = policy_model(next_actor_observation, std)
             next_action = dist.pi.rsample()
@@ -117,7 +126,12 @@ class DDPGDoubleQ:
 
         critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
-        return critic_loss
+        return {
+            "loss": critic_loss,
+            "q1": q1.mean(),
+            "q2": q2.mean(),
+            "q_target": q_target.mean()
+        }
 
     @staticmethod
     def compute_policy_loss_asymmetric(
@@ -127,7 +141,7 @@ class DDPGDoubleQ:
         critic_observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         dist: DeterministicContinuousPolicyStep = policy_model(actor_observation, std)
         action = dist.pi.rsample()
         q_steps:Q_STEPS = critic_model(critic_observation, action)
@@ -139,7 +153,9 @@ class DDPGDoubleQ:
         policy_loss = -q.mean()
         policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     def compute_policy_loss_asymmetric_with_multi_critic(
@@ -150,7 +166,7 @@ class DDPGDoubleQ:
         critic_observation: torch.Tensor,
         std: torch.Tensor,
         regularization_weight: float = 0.0,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         dist: DeterministicContinuousPolicyStep = policy_model(actor_observation, std)
         action = dist.pi.rsample()
         policy_loss = 0
@@ -165,7 +181,9 @@ class DDPGDoubleQ:
 
         policy_loss += dist.mean.pow(2).mean() * regularization_weight
 
-        return policy_loss
+        return {
+            "loss": policy_loss
+        }
 
     @staticmethod
     @torch.no_grad()
