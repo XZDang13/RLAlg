@@ -73,8 +73,8 @@ class GAN:
         true_label = torch.ones_like(logits_real, device=logits_real.device)
         fake_label = torch.zeros_like(logits_fake, device=logits_fake.device)
 
-        loss_real = F.binary_cross_entropy_with_logits(logits_real, true_label).mean()
-        loss_fake = F.binary_cross_entropy_with_logits(logits_fake, fake_label).mean()
+        loss_real = F.binary_cross_entropy_with_logits(logits_real, true_label)
+        loss_fake = F.binary_cross_entropy_with_logits(logits_fake, fake_label)
 
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
         loss_r1 = 0
