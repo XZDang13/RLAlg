@@ -21,7 +21,7 @@ class PPO:
     def compute_policy_loss_with_multi_critic(
         policy_model: NNMODEL,
         log_probs_hat: torch.Tensor,
-        observations: torch.Tensor,
+        observations: torch.Tensor|dict[str, torch.Tensor],
         actions: torch.Tensor,
         advantages_list: list[torch.Tensor],
         weights: list[float],
@@ -55,7 +55,7 @@ class PPO:
     def compute_policy_loss(
         policy_model: NNMODEL,
         log_probs_hat: torch.Tensor,
-        observations: torch.Tensor,
+        observations: torch.Tensor|dict[str, torch.Tensor],
         actions: torch.Tensor,
         advantages: torch.Tensor,
         clip_ratio: float,
@@ -85,7 +85,7 @@ class PPO:
     @staticmethod
     def compute_value_loss(
         value_model: NNMODEL,
-        observations: torch.Tensor,
+        observations: torch.Tensor|dict[str, torch.Tensor],
         returns: torch.Tensor
     ) -> dict[str, torch.Tensor]:
         step: ValueStep = value_model(observations)
@@ -98,7 +98,7 @@ class PPO:
     @staticmethod
     def compute_clipped_value_loss(
         value_model: NNMODEL,
-        observations: torch.Tensor,
+        observations: torch.Tensor|dict[str, torch.Tensor],
         values_hat: torch.Tensor,
         returns: torch.Tensor,
         clip_ratio: float

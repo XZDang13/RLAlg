@@ -13,7 +13,7 @@ class DSAC:
     def compute_policy_loss(
         policy_model: NNMODEL,
         critic_model: NNMODEL,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         alpha: float,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
@@ -54,10 +54,10 @@ class DSAC:
         actor_target_model: NNMODEL,
         critic_model: NNMODEL,
         critic_target_model: NNMODEL,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         action: torch.Tensor,
         reward: torch.Tensor,
-        next_observation: torch.Tensor,
+        next_observation: torch.Tensor|dict[str, torch.Tensor],
         done: torch.Tensor,
         alpha: float,
         gamma: float,
@@ -119,7 +119,7 @@ class DSAC:
     def compute_alpha_loss(
         policy_model: NNMODEL,
         log_alpha: torch.Tensor,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         target_entropy: float
     ) -> dict[str, torch.Tensor]:
         step: StochasticContinuousPolicyStep = policy_model(observation)

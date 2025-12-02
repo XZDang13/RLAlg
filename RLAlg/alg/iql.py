@@ -15,7 +15,7 @@ class IQL:
     def compute_value_loss(
         value_model: nn.Module,
         critic_target_model: nn.Module,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         action: torch.Tensor,
         expectile: float
     ) -> dict[str, torch.Tensor]:
@@ -40,7 +40,7 @@ class IQL:
         policy_model: nn.Module,
         value_model: nn.Module,
         critic_target_model: nn.Module,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         action: torch.Tensor,
         temperature: float
     ) -> dict[str, torch.Tensor]:
@@ -70,11 +70,11 @@ class IQL:
     def compute_critic_loss(
         value_model: nn.Module,
         critic_model: nn.Module,
-        observation: torch.Tensor,
+        observation: torch.Tensor|dict[str, torch.Tensor],
         action: torch.Tensor,
         reward: torch.Tensor,
         done: torch.Tensor,
-        next_observation: torch.Tensor,
+        next_observation: torch.Tensor|dict[str, torch.Tensor],
         gamma: float
     ) -> dict[str, torch.Tensor]:
         with torch.no_grad():

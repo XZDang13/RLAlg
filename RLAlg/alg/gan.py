@@ -97,6 +97,8 @@ class GAN:
         fake_data: torch.Tensor,
         detach_fake: bool = True,
         label_smoothing: float = 0.0,  # e.g., 0.1 -> real=0.9, fake=0.1
+        random_smoothing: bool = False,
+        one_sided_smoothing: bool = False,
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
     ) -> dict[str, torch.Tensor]:
         """
@@ -128,10 +130,14 @@ class GAN:
         # This keeps the stable form while nudging targets away from 0/1.
         if label_smoothing > 0.0:
             # Smooth real->(1-ε), fake->ε. In stable form, implement by mixing the opposite terms.
-            eps = float(label_smoothing)
+            if random_smoothing:
+                eps = torch.rand(1).item() * label_smoothing
+            else:
+                eps = float(label_smoothing)
             # mix: L = (1-ε)*L + ε*alternative_L
             loss_real = (1 - eps) * loss_real + eps * F.softplus(logits_real).mean()
-            loss_fake = (1 - eps) * loss_fake + eps * F.softplus(-logits_fake).mean()
+            if not one_sided_smoothing:
+                loss_fake = (1 - eps) * loss_fake + eps * F.softplus(-logits_fake).mean()
 
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
         loss_r1 = 0
