@@ -272,9 +272,11 @@ class CriticHead(nn.Module):
     """
     Value function head.
     """
-    def __init__(self, feature_dim: int) -> None:
+    def __init__(self, feature_dim: int, value_dim: int=1, squeeze: bool=True) -> None:
         super().__init__()
-        self.critic_layer = nn.Linear(feature_dim, 1)
+        self.critic_layer = nn.Linear(feature_dim, value_dim)
+        self.value_dim = value_dim
+        self.squeeze = squeeze
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -291,8 +293,11 @@ class CriticHead(nn.Module):
             scalar value
         """
         value = self.critic_layer(x)
+        if self.squeeze:
+            value = value.squeeze(-1)
 
-        step = ValueStep(value=value.squeeze(-1))
+        step = ValueStep(value=value)
+        
         return step
 
 

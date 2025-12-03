@@ -38,13 +38,15 @@ def compute_gae(rewards:torch.Tensor,
                 dones:torch.Tensor,
                 last_values: torch.Tensor,
                 gamma: float = 0.99, lambda_: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
-    steps, num_envs = rewards.size(0), rewards.size(1)
+    size = rewards.size()
+
+    steps = size[0]
 
     returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
     advantages = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
 
     next_value = torch.as_tensor(last_values, dtype=rewards.dtype, device=rewards.device)
-    next_advantage = torch.zeros(num_envs, dtype=rewards.dtype, device=rewards.device)
+    next_advantage = torch.zeros(size[1:], dtype=rewards.dtype, device=rewards.device)
 
     for step in reversed(range(steps)):
         delta = rewards[step] + gamma * next_value * (1.0 - dones[step]) - values[step]

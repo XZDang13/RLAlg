@@ -12,32 +12,61 @@ from typing import Dict, Any, Optional
 
 class GAN:
     @staticmethod
-    def compute_gradient(inputs:torch.Tensor, outputs:torch.Tensor) -> torch.Tensor:
+    def compute_gradient(inputs:torch.Tensor|list[torch.Tensor],
+                         outputs:torch.Tensor,
+                        ) -> torch.Tensor:
 
-        grad = torch.autograd.grad(
+        grads = torch.autograd.grad(
             outputs=outputs.sum(),
             inputs=inputs,
             create_graph=True,
             retain_graph=True,
             only_inputs=True
-        )[0]
-        
+        )
 
-        return grad
+        return torch.cat([torch.flatten(grad, 1) for grad in grads], dim=1)
     
     @staticmethod
-    def compute_r1_gradient_penalty(inputs:torch.Tensor, outputs:torch.Tensor, gamma:float) -> torch.Tensor:
-        grads = GAN.compute_gradient(inputs, outputs)
-        grads = grads.view(inputs.size(0), -1)
+    def compute_r1_gradient_penalty(inputs:torch.Tensor|dict[str, torch.Tensor],
+                                    outputs:torch.Tensor,
+                                    gamma:float,
+                                    grad_penalty_on: list[str]|None = None) -> torch.Tensor:
+        selected_inputs = None
+
+        if isinstance(inputs, dict):
+            if grad_penalty_on is None:
+                selected_inputs = inputs.values()
+            else:
+                selected_inputs = [inputs[key] for key in grad_penalty_on]
+        else:
+            selected_inputs = inputs
+
+        grads = GAN.compute_gradient(selected_inputs, outputs)
+        
         grad_sq = grads.pow(2).sum(dim=1)
         gp = 0.5 * gamma * grad_sq.mean()
 
         return gp
     
     @staticmethod
-    def compute_wp_gradient_penalty(inputs:torch.Tensor, outputs:torch.Tensor, lambda_gp:float, gp_center:float) -> torch.Tensor:
-        grads = GAN.compute_gradient(inputs, outputs)
-        grads = grads.view(inputs.size(0), -1)
+    def compute_wp_gradient_penalty(inputs:torch.Tensor|dict[str, torch.Tensor],
+                                    outputs:torch.Tensor,
+                                    lambda_gp:float,
+                                    gp_center:float,
+                                    grad_penalty_on: list[str]|None = None) -> torch.Tensor:
+        
+        selected_inputs = None
+
+        if isinstance(inputs, dict):
+            if grad_penalty_on is None:
+                selected_inputs = inputs.values()
+            else:
+                selected_inputs = [inputs[key] for key in grad_penalty_on]
+        else:
+            selected_inputs = inputs
+
+        grads = GAN.compute_gradient(selected_inputs, outputs)
+
         grad_norm = grads.norm(2, dim=1)
         gp = lambda_gp * ((grad_norm - gp_center) ** 2).mean()
 
@@ -46,10 +75,11 @@ class GAN:
     @staticmethod
     def compute_bce_loss(
         discriminator,
-        real_data: torch.Tensor,
-        fake_data: torch.Tensor,
+        real_data: torch.Tensor|dict[str, torch.Tensor],
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
         detach_fake: bool = True,
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
+        grad_penalty_on: list[str]|None = None
     ) -> dict[str, torch.Tensor]:
         """
         Logistic/BCE loss for the discriminator (a.k.a. non-saturating loss).
@@ -79,7 +109,7 @@ class GAN:
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
         loss_r1 = 0
         if r1_gamma > 0.0:
-            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma, grad_penalty_on)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -93,13 +123,14 @@ class GAN:
     @staticmethod
     def compute_soft_bce_loss(
         discriminator,
-        real_data: torch.Tensor,
-        fake_data: torch.Tensor,
+        real_data: torch.Tensor|dict[str, torch.Tensor],
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
         detach_fake: bool = True,
         label_smoothing: float = 0.0,  # e.g., 0.1 -> real=0.9, fake=0.1
         random_smoothing: bool = False,
         one_sided_smoothing: bool = False,
         r1_gamma: float = 0.0,         # set >0 to enable R1 gradient penalty on real
+        grad_penalty_on: list[str]|None = None
     ) -> dict[str, torch.Tensor]:
         """
         Logistic/BCE loss for the discriminator (a.k.a. non-saturating loss).
@@ -142,7 +173,7 @@ class GAN:
         # Optional R1 gradient penalty: (γ/2) * E[||∇_x D(x)||^2]
         loss_r1 = 0
         if r1_gamma > 0.0:
-            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma, grad_penalty_on)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -156,10 +187,11 @@ class GAN:
     @staticmethod
     def compute_hinge_loss(
         discriminator,
-        real_data: torch.Tensor,
-        fake_data: torch.Tensor,
+        real_data: torch.Tensor|dict[str, torch.Tensor],
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
         detach_fake: bool = True,
         r1_gamma: float = 0.0,
+        grad_penalty_on: list[str]|None = None
     ) -> dict[str, torch.Tensor]:
         """
         Hinge GAN discriminator loss:
@@ -186,7 +218,7 @@ class GAN:
 
         loss_r1 = 0
         if r1_gamma > 0.0:
-            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma, grad_penalty_on)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -200,12 +232,13 @@ class GAN:
     @staticmethod
     def compute_lsgan_loss(
         discriminator,
-        real_data: torch.Tensor,
-        fake_data: torch.Tensor,
+        real_data: torch.Tensor|dict[str, torch.Tensor],
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
         detach_fake: bool = True,
         real_target: float = 1.0,
         fake_target: float = 0.0,
         r1_gamma: float = 0.0,   # optional R1 on real; leave 0.0 to disable
+        grad_penalty_on: list[str]|None = None
     ) -> dict[str, torch.Tensor]:
         """
         LSGAN discriminator loss (Mao et al. 2017):
@@ -235,7 +268,7 @@ class GAN:
 
         loss_r1 = 0
         if r1_gamma > 0.0:
-            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma)
+            loss_r1 = GAN.compute_r1_gradient_penalty(real_data, logits_real, r1_gamma, grad_penalty_on)
 
         total = loss_real + loss_fake + loss_r1
 
@@ -249,11 +282,12 @@ class GAN:
     @staticmethod
     def compute_wasserstein_loss(
         discriminator,
-        real_data: torch.Tensor,
-        fake_data: torch.Tensor,
+        real_data: torch.Tensor|dict[str, torch.Tensor],
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
         lambda_gp: float = 10.0,
         detach_fake: bool = True,
         gp_center: float = 1.0,
+        grad_penalty_on: list[str]|None = None
     ) -> dict[str, torch.Tensor]:
         """
         WGAN-GP discriminator loss:
@@ -277,16 +311,25 @@ class GAN:
         loss_wgan = logits_real.mean() - logits_fake.mean()
 
         # Interpolate
-        bsz = real_data.size(0)
-        eps_shape = [bsz] + [1] * (real_data.dim() - 1)  # broadcastable
-        eps = torch.rand(eps_shape, device=device, dtype=real_data.dtype)
-        x_hat = (eps * real_data + (1.0 - eps) * fake_data).detach().requires_grad_(True)
+
+        if isinstance(real_data, torch.Tensor):
+            bsz = real_data.size(0)
+            eps_shape = [bsz] + [1] * (real_data.dim() - 1)  # broadcastable
+            eps = torch.rand(eps_shape, device=device, dtype=real_data.dtype)
+            x_hat = (eps * real_data + (1.0 - eps) * fake_data).detach().requires_grad_(True)
+        elif isinstance(real_data, dict):
+            bsz = next(iter(real_data.values())).size(0)
+            eps_shape = [bsz] + [1] * (next(iter(real_data.values())).dim() - 1)
+            eps = torch.rand(eps_shape, device=device, dtype=next(iter(real_data.values())).dtype)
+            x_hat = {}
+            for key in real_data.keys():
+                x_hat[key] = (eps * real_data[key] + (1.0 - eps) * fake_data[key]).detach().requires_grad_(True)
 
         d_hat = discriminator(x_hat)
         if isinstance(d_hat, ValueStep):
             d_hat = d_hat.value
 
-        loss_gp = GAN.compute_wp_gradient_penalty(x_hat, d_hat, lambda_gp, gp_center)
+        loss_gp = GAN.compute_wp_gradient_penalty(x_hat, d_hat, lambda_gp, gp_center, grad_penalty_on)
 
         total = loss_wgan + loss_gp
 
@@ -300,7 +343,7 @@ class GAN:
     @staticmethod
     def compute_generator_softplus_loss(
         discriminator,
-        fake_data: torch.Tensor,
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         logits_fake = discriminator(fake_data)
 
@@ -316,7 +359,7 @@ class GAN:
     @staticmethod
     def compute_generator_mean_loss(
         discriminator,
-        fake_data: torch.Tensor,
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         logits_fake = discriminator(fake_data)
 
@@ -332,7 +375,7 @@ class GAN:
     @staticmethod
     def compute_generator_ls_loss(
         discriminator,
-        fake_data: torch.Tensor,
+        fake_data: torch.Tensor|dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         logits_fake = discriminator(fake_data)
 
