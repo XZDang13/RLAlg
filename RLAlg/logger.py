@@ -13,6 +13,10 @@ class WandbLogger:
     def log_metrics(metrics:dict, step:int):
         wandb.log(metrics, step=step)
 
+    @staticmethod
+    def finish_project():
+        wandb.finish()
+
 
 class MetricsTracker:
     List = 0
@@ -50,14 +54,16 @@ class MetricsTracker:
             
             self._storages[name][indices] = 0.0
 
-    def get_mean(self, name: str, indices: Optional[torch.Tensor] = None):
+    def get_mean(self, name: str, terminate: Optional[torch.Tensor] = None):
         value = 0
+
         if self._types[name] == MetricsTracker.List:
             value = np.mean(self._storages[name])
         elif self._types[name] == MetricsTracker.Tensor:
-            if indices is None:
-                indices = torch.ones_like(self._storages[name], dtype=torch.bool)
+            if terminate is None:
+                terminate = torch.ones_like(self._storages[name], dtype=torch.bool)
 
-            value = self._storages[name].mean().item()
+            indices = torch.nonzero(terminate, as_tuple=False).cpu().squeeze(-1)
+            value = self._storages[name][indices].mean().item()
 
         return value 
