@@ -2,61 +2,64 @@ from typing import Generator, Any
 import os
 import torch
 
-def compute_returns(rewards:torch.Tensor, dones:torch.Tensor, gamma: float = 0.99) -> torch.Tensor:
-    steps, num_envs = rewards.size(0), rewards.size(1)
+@torch.no_grad()
+def compute_returns(
+    rewards: torch.Tensor,        # [T, N]
+    terminated: torch.Tensor,     # [T, N] 1 if true terminal else 0
+    last_values: torch.Tensor,    # [N] = V(s_T)
+    gamma: float = 0.99,
+) -> torch.Tensor:
+    T, N = rewards.shape
+    returns = torch.zeros_like(rewards)
 
-    returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
-    next_return = torch.zeros(num_envs, dtype=rewards.dtype, device=rewards.device)
-    for step in reversed(range(steps)):
-        next_return = rewards[step] + gamma * next_return * (1.0 - dones[step])
-        returns[step] = next_return
-        
+    not_term = 1.0 - terminated
+    next_return = last_values.to(dtype=rewards.dtype, device=rewards.device)
+
+    for t in reversed(range(T)):
+        next_return = rewards[t] + gamma * next_return * not_term[t]
+        returns[t] = next_return
+
     return returns
 
-def compute_advantage(rewards:torch.Tensor,
-                      values:torch.Tensor,
-                      dones:torch.Tensor,
-                      gamma: float = 0.99) -> tuple[torch.Tensor, torch.Tensor]:
-    steps, num_envs = rewards.size(0), rewards.size(1)
 
-    returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
-    advantages = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
-    
-
-    next_return = torch.zeros(num_envs, dtype=rewards.dtype, device=rewards.device)
-    for step in reversed(range(steps)):
-        next_return = rewards[step] + gamma * next_return * (1.0 - dones[step])
-        returns[step] = next_return
-        advantages[step] = returns[step] - values[step]
-
+@torch.no_grad()
+def compute_advantage_mc(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    terminated: torch.Tensor,
+    last_values: torch.Tensor,
+    gamma: float = 0.99,
+):
+    returns = compute_returns(rewards, terminated, last_values, gamma)
+    advantages = returns - values
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
     return returns, advantages
 
-def compute_gae(rewards:torch.Tensor,
-                values:torch.Tensor,
-                dones:torch.Tensor,
-                last_values: torch.Tensor,
-                gamma: float = 0.99, lambda_: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
-    size = rewards.size()
+@torch.no_grad()
+def compute_gae(
+    rewards: torch.Tensor,        # [T, N]
+    values: torch.Tensor,         # [T, N]
+    terminated: torch.Tensor,     # [T, N]
+    last_values: torch.Tensor,    # [N]
+    gamma: float = 0.99,
+    lambda_: float = 0.95,
+):
+    T, N = rewards.shape
+    advantages = torch.zeros_like(rewards)
+    returns = torch.zeros_like(rewards)
 
-    steps = size[0]
+    not_term = 1.0 - terminated
+    next_value = last_values.to(dtype=rewards.dtype, device=rewards.device)
+    next_adv = torch.zeros((N,), dtype=rewards.dtype, device=rewards.device)
 
-    returns = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
-    advantages = torch.zeros_like(rewards, dtype=rewards.dtype, device=rewards.device)
+    for t in reversed(range(T)):
+        delta = rewards[t] + gamma * next_value * not_term[t] - values[t]
+        next_adv = delta + gamma * lambda_ * next_adv * not_term[t]
+        advantages[t] = next_adv
+        next_value = values[t]
 
-    next_value = torch.as_tensor(last_values, dtype=rewards.dtype, device=rewards.device)
-    next_advantage = torch.zeros(size[1:], dtype=rewards.dtype, device=rewards.device)
-
-    for step in reversed(range(steps)):
-        delta = rewards[step] + gamma * next_value * (1.0 - dones[step]) - values[step]
-        next_advantage = delta + gamma * lambda_ * next_advantage * (1.0 - dones[step])
-        advantages[step] = next_advantage
-        returns[step] = advantages[step] + values[step]
-        next_value = values[step]
-
+    returns = advantages + values
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
     return returns, advantages
 
 class ReplayBuffer:
