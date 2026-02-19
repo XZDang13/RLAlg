@@ -1,4 +1,5 @@
 from typing import Callable, Optional, Union
+from enum import Enum
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,24 +8,44 @@ from .steps import DiscretePolicyStep, StochasticContinuousPolicyStep, Determini
 from ..utils import weight_init
 
 
+class NormPosition(Enum):
+    NONE = 0
+    PRE = 1
+    POST = 2
+
 class MLPLayer(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, activate_func: nn.Module = nn.ReLU(), norm: bool = False) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        activate_func: Optional[nn.Module] = None,
+        norm_position: NormPosition = NormPosition.NONE,
+    ) -> None:
         super().__init__()
-        bias = not norm
-        self.linear = nn.Linear(in_dim, out_dim, bias)
-        self.norm = nn.LayerNorm(out_dim) if norm else nn.Identity()
+        if activate_func is None:
+            activate_func = nn.ReLU()
+        if not isinstance(norm_position, NormPosition):
+            raise TypeError(f"norm_position must be NormPosition, got {type(norm_position)}.")
+
+        use_norm = norm_position is not NormPosition.NONE
+        self.pre_norm = nn.LayerNorm(in_dim) if use_norm and norm_position is NormPosition.PRE else nn.Identity()
+        self.post_norm = nn.LayerNorm(out_dim) if use_norm and norm_position is NormPosition.POST else nn.Identity()
+        self.linear = nn.Linear(in_dim, out_dim, bias=not use_norm)
         self.activate_func = activate_func
 
         self.reset_parameters()
 
     def reset_parameters(self):
         weight_init(self.linear)
-        if not isinstance(self.norm, nn.Identity):
-            self.norm.reset_parameters()
+        if not isinstance(self.pre_norm, nn.Identity):
+            self.pre_norm.reset_parameters()
+        if not isinstance(self.post_norm, nn.Identity):
+            self.post_norm.reset_parameters()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre_norm(x)
         x = self.linear(x)
-        x = self.norm(x)
+        x = self.post_norm(x)
         x = self.activate_func(x)
         return x
     
@@ -115,9 +136,10 @@ class DeterministicHead(nn.Module):
         mu = self.linear(x)
         base_pi = Normal(mu, std)
         pi = TransformedDistribution(base_pi, self.transform)
-        
         if self.max_action is not None:
             mu_squashed = self.max_action * torch.tanh(mu)
+        else:
+            mu_squashed = mu
 
         step = DeterministicContinuousPolicyStep(pi, mu_squashed)
         return step
@@ -340,11 +362,11 @@ class DistributeCriticHead(nn.Module):
         step = DistributionStep(pi, mu, std, sample)
         return step
 
-def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm:bool) -> tuple[nn.Sequential, int]:
+def make_mlp_layers(in_dim:int, layer_dims:list[int], activate_function:Callable[[torch.Tensor], torch.Tensor], norm_position:NormPosition) -> tuple[nn.Sequential, int]:
     layers = []
 
     for dim in layer_dims:
-        mlp = MLPLayer(in_dim, dim, activate_function, norm)
+        mlp = MLPLayer(in_dim, dim, activate_function, norm_position=norm_position)
         in_dim = dim
 
         layers.append(mlp)
