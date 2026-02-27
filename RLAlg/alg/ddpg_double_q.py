@@ -8,6 +8,17 @@ Q_STEPS = tuple[ValueStep, ValueStep]
 
 class DDPGDoubleQ:
     @staticmethod
+    def _validate_multi_critic_inputs(critic_models: list[NNMODEL], weights: list[float]) -> None:
+        if len(critic_models) == 0:
+            raise ValueError("critic_models must be non-empty.")
+        if len(weights) == 0:
+            raise ValueError("weights must be non-empty.")
+        if len(critic_models) != len(weights):
+            raise ValueError(
+                f"critic_models and weights must have the same length, got {len(critic_models)} and {len(weights)}."
+            )
+
+    @staticmethod
     def compute_critic_loss(
         policy_model: NNMODEL,
         critic_model: NNMODEL,
@@ -22,6 +33,7 @@ class DDPGDoubleQ:
     ) -> dict[str, torch.Tensor]:
 
         with torch.no_grad():
+            done = done.to(dtype=reward.dtype, device=reward.device)
             dist: DeterministicContinuousPolicyStep = policy_model(next_observation, std)
             next_action = dist.pi.rsample()
             q_target_steps:Q_STEPS = critic_target_model(next_observation, next_action)
@@ -77,6 +89,7 @@ class DDPGDoubleQ:
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> dict[str, torch.Tensor]:
+        DDPGDoubleQ._validate_multi_critic_inputs(critic_models, weights)
         dist: DeterministicContinuousPolicyStep = policy_model(observation, std)
         action = dist.pi.rsample()
         policy_loss = 0
@@ -110,6 +123,7 @@ class DDPGDoubleQ:
         gamma: float = 0.99,
     ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
+            done = done.to(dtype=reward.dtype, device=reward.device)
             dist: DeterministicContinuousPolicyStep = policy_model(next_actor_observation, std)
             next_action = dist.pi.rsample()
             q_target_steps:Q_STEPS = critic_target_model(next_critic_observation, next_action)
@@ -167,6 +181,7 @@ class DDPGDoubleQ:
         std: torch.Tensor,
         regularization_weight: float = 0.0,
     ) -> dict[str, torch.Tensor]:
+        DDPGDoubleQ._validate_multi_critic_inputs(critic_models, weights)
         dist: DeterministicContinuousPolicyStep = policy_model(actor_observation, std)
         action = dist.pi.rsample()
         policy_loss = 0

@@ -6,6 +6,17 @@ NNMODEL = nn.Module
 
 class DDPG:
     @staticmethod
+    def _validate_multi_critic_inputs(critic_models: list[NNMODEL], weights: list[float]) -> None:
+        if len(critic_models) == 0:
+            raise ValueError("critic_models must be non-empty.")
+        if len(weights) == 0:
+            raise ValueError("weights must be non-empty.")
+        if len(critic_models) != len(weights):
+            raise ValueError(
+                f"critic_models and weights must have the same length, got {len(critic_models)} and {len(weights)}."
+            )
+
+    @staticmethod
     def compute_critic_loss(
         actor_target_model: NNMODEL,
         critic_model: NNMODEL,
@@ -20,6 +31,7 @@ class DDPG:
         q_step: ValueStep = critic_model(observation, action)
         q = q_step.value
         with torch.no_grad():
+            done = done.to(dtype=reward.dtype, device=reward.device)
             next_action_step: DeterministicContinuousPolicyStep = actor_target_model(next_observation)
             next_action = next_action_step.mean
             next_q_step: ValueStep = critic_target_model(next_observation, next_action)
@@ -61,10 +73,11 @@ class DDPG:
         observation: torch.Tensor|dict[str, torch.Tensor],
         regularization_weight: float = 0.0,
     ) -> dict[str, torch.Tensor]:
+        DDPG._validate_multi_critic_inputs(critic_models, weights)
         action_step: DeterministicContinuousPolicyStep = policy_model(observation)
         action = action_step.mean
 
-        policy_loss = 0
+        policy_loss = torch.zeros((), dtype=action.dtype, device=action.device)
         for weight, critic_model in zip(weights, critic_models):
             q_value: ValueStep = critic_model(observation, action)
             policy_loss += -q_value.value.mean() * weight
@@ -91,6 +104,7 @@ class DDPG:
         q_step: ValueStep = critic_model(critic_observation, action)
         q = q_step.value
         with torch.no_grad():
+            done = done.to(dtype=reward.dtype, device=reward.device)
             next_action_step: DeterministicContinuousPolicyStep = actor_target_model(next_actor_observation)
             next_action = next_action_step.mean
             next_q_step: ValueStep = critic_target_model(next_critic_observation, next_action)
@@ -133,12 +147,13 @@ class DDPG:
         critic_observation: torch.Tensor|dict[str, torch.Tensor],
         regularization_weight: float = 0.0,
     ) -> dict[str, torch.Tensor]:
+        DDPG._validate_multi_critic_inputs(critic_models, weights)
         action_step: DeterministicContinuousPolicyStep = policy_model(actor_observation)
         action = action_step.mean
 
-        policy_loss = 0
+        policy_loss = torch.zeros((), dtype=action.dtype, device=action.device)
         for weight, critic_model in zip(weights, critic_models):
-            q_value: ValueStep = critic_model(torch.cat([critic_observation, action], dim=-1))
+            q_value: ValueStep = critic_model(critic_observation, action)
             policy_loss += -q_value.value.mean() * weight
 
         policy_loss += (action ** 2).mean() * regularization_weight

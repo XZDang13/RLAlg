@@ -12,8 +12,8 @@ class Normalizer(nn.Module):
 
     def update(self, x:torch.Tensor):
         batch_mean = torch.mean(x, dim=0)
-        batch_var = torch.var(x, dim=0)
-        batch_count = x.size(0)
+        batch_var = torch.var(x, dim=0, unbiased=False)
+        batch_count = torch.as_tensor(x.size(0), device=self.count.device, dtype=self.count.dtype)
 
         delta = batch_mean - self.mean
         total_count = self.count + batch_count

@@ -8,10 +8,29 @@ NNMODEL = nn.Module
 
 class PPO:
     @staticmethod
+    def _validate_same_shape(name_a: str, tensor_a: torch.Tensor, name_b: str, tensor_b: torch.Tensor) -> None:
+        if tensor_a.shape != tensor_b.shape:
+            raise ValueError(
+                f"{name_a} and {name_b} must have the same shape, got {tuple(tensor_a.shape)} and {tuple(tensor_b.shape)}."
+            )
+
+    @staticmethod
+    def _validate_multi_critic_inputs(weights: list[float], advantages_list: list[torch.Tensor]) -> None:
+        if len(weights) == 0:
+            raise ValueError("weights must be non-empty.")
+        if len(advantages_list) == 0:
+            raise ValueError("advantages_list must be non-empty.")
+        if len(weights) != len(advantages_list):
+            raise ValueError(
+                f"weights and advantages_list must have the same length, got {len(weights)} and {len(advantages_list)}."
+            )
+
+    @staticmethod
     def compute_kl_divergence(
         log_probs: torch.Tensor,
         log_probs_hat: torch.Tensor
     ) -> torch.Tensor:
+        PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
         with torch.no_grad():
             ratio = (log_probs - log_probs_hat)
             kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
@@ -28,16 +47,18 @@ class PPO:
         clip_ratio: float,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
-
+        PPO._validate_multi_critic_inputs(weights, advantages_list)
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
+        PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
         entropy = step.entropy.mean()
 
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
 
-        loss = 0.0
+        loss = torch.zeros((), dtype=log_probs.dtype, device=log_probs.device)
         for weight, advantages in zip(weights, advantages_list):
+            PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
             loss += -torch.min(ratio * advantages, clipped_ratio * advantages).mean() * weight
 
         if isinstance(step, StochasticContinuousPolicyStep):
@@ -61,9 +82,10 @@ class PPO:
         clip_ratio: float,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
-
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
+        PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
+        PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
         entropy = step.entropy.mean()
 
         ratio = (log_probs - log_probs_hat).exp()
@@ -90,6 +112,7 @@ class PPO:
     ) -> dict[str, torch.Tensor]:
         step: ValueStep = value_model(observations)
         values = step.value
+        PPO._validate_same_shape("values", values, "returns", returns)
         loss = 0.5 * ((returns - values) ** 2).mean()
         return {
             "loss": loss
@@ -105,6 +128,8 @@ class PPO:
     ) -> dict[str, torch.Tensor]:
         step: ValueStep = value_model(observations)
         values = step.value
+        PPO._validate_same_shape("values", values, "values_hat", values_hat)
+        PPO._validate_same_shape("values", values, "returns", returns)
 
         loss_unclipped = 0.5 * (returns - values) ** 2
 

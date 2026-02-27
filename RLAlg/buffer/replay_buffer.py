@@ -1,5 +1,4 @@
 from typing import Generator, Any
-import os
 import torch
 
 @torch.no_grad()
@@ -12,6 +11,7 @@ def compute_returns(
     T, N = rewards.shape
     returns = torch.zeros_like(rewards)
 
+    terminated = terminated.to(dtype=rewards.dtype, device=rewards.device)
     not_term = 1.0 - terminated
     next_return = last_values.to(dtype=rewards.dtype, device=rewards.device)
 
@@ -48,6 +48,7 @@ def compute_gae(
     advantages = torch.zeros_like(rewards)
     returns = torch.zeros_like(rewards)
 
+    terminated = terminated.to(dtype=rewards.dtype, device=rewards.device)
     not_term = 1.0 - terminated
     next_value = last_values.to(dtype=rewards.dtype, device=rewards.device)
     next_adv = torch.zeros((N,), dtype=rewards.dtype, device=rewards.device)
@@ -82,6 +83,14 @@ class ReplayBuffer:
         self.data[key_name] = torch.zeros((self.steps, self.num_envs, *data_shape), dtype=dtype, device=self.device)
 
     def add_storage(self, key_name: str, values: torch.Tensor) -> None:
+        if values.ndim < 2:
+            raise ValueError(
+                f"Storage for key '{key_name}' must have at least 2 dims [steps, num_envs, ...], got shape {tuple(values.shape)}."
+            )
+        if values.shape[0] != self.steps or values.shape[1] != self.num_envs:
+            raise ValueError(
+                f"Storage for key '{key_name}' must have shape [steps={self.steps}, num_envs={self.num_envs}, ...], got {tuple(values.shape)}."
+            )
         self.data[key_name] = values.to(self.device)
 
     def add_records(self, record: dict[str, Any]) -> None:
@@ -97,13 +106,15 @@ class ReplayBuffer:
         self.current_size = min(self.current_size + 1, self.steps)
 
     def sample_batchs(self, key_names:list[str], batch_size: int) -> Generator[dict[str, torch.Tensor], None, None]:
-        total = self.steps * self.num_envs
+        total = self.current_size * self.num_envs
+        if total == 0:
+            raise ValueError("Cannot sample from an empty buffer.")
         indices = torch.randperm(total, device=self.device)
 
         batch = {}
         for key in key_names:
             data = self.data[key]
-            batch[key] = data.view(total, *data.shape[2:])
+            batch[key] = data[:self.current_size].reshape(total, *data.shape[2:])
 
         for start in range(0, total, batch_size):
             idx = indices[start:start + batch_size]
@@ -111,6 +122,8 @@ class ReplayBuffer:
 
     def sample_batch(self, key_names:list[str], batch_size: int) -> dict[str, torch.Tensor]:
         total = self.current_size * self.num_envs
+        if total == 0:
+            raise ValueError("Cannot sample from an empty buffer.")
         indices = torch.randint(0, total, (batch_size,), device=self.device)
 
         batch = {}
@@ -124,6 +137,8 @@ class ReplayBuffer:
     def sample_tensor(self, key_name:str, batch_size: int) -> torch.Tensor:
         data = self.data[key_name]
         total = self.current_size * self.num_envs
+        if total == 0:
+            raise ValueError("Cannot sample from an empty buffer.")
         indices = torch.randint(0, total, (batch_size,), device=self.device)
         shape = data.shape[2:]
         flat = data[:self.current_size].reshape(total, *shape)

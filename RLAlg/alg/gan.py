@@ -1,16 +1,23 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
 from ..nn.steps import ValueStep
 
-NNMODEL = nn.Module
-
-import torch
-import torch.nn.functional as F
-from typing import Dict, Any, Optional
-
 class GAN:
+    @staticmethod
+    def _detach_data(data: torch.Tensor | dict[str, torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor]:
+        if isinstance(data, dict):
+            return {key: value.detach() for key, value in data.items()}
+        return data.detach()
+
+    @staticmethod
+    def _set_requires_grad(
+        data: torch.Tensor | dict[str, torch.Tensor],
+        requires_grad: bool,
+    ) -> torch.Tensor | dict[str, torch.Tensor]:
+        if isinstance(data, dict):
+            return {key: value.requires_grad_(requires_grad) for key, value in data.items()}
+        return data.requires_grad_(requires_grad)
+
     @staticmethod
     def compute_gradient(inputs:torch.Tensor|list[torch.Tensor],
                          outputs:torch.Tensor,
@@ -35,7 +42,7 @@ class GAN:
 
         if isinstance(inputs, dict):
             if grad_penalty_on is None:
-                selected_inputs = inputs.values()
+                selected_inputs = list(inputs.values())
             else:
                 selected_inputs = [inputs[key] for key in grad_penalty_on]
         else:
@@ -59,7 +66,7 @@ class GAN:
 
         if isinstance(inputs, dict):
             if grad_penalty_on is None:
-                selected_inputs = inputs.values()
+                selected_inputs = list(inputs.values())
             else:
                 selected_inputs = [inputs[key] for key in grad_penalty_on]
         else:
@@ -86,10 +93,10 @@ class GAN:
         Uses a numerically stable softplus form. Optionally applies R1 penalty.
         """
         if detach_fake:
-            fake_data = fake_data.detach()
+            fake_data = GAN._detach_data(fake_data)
 
         if r1_gamma != 0:
-            real_data.requires_grad_(True)
+            real_data = GAN._set_requires_grad(real_data, True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -137,10 +144,10 @@ class GAN:
         Uses a numerically stable softplus form. Optionally applies R1 penalty.
         """
         if detach_fake:
-            fake_data = fake_data.detach()
+            fake_data = GAN._detach_data(fake_data)
 
         if r1_gamma != 0:
-            real_data.requires_grad_(True)
+            real_data = GAN._set_requires_grad(real_data, True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -199,10 +206,10 @@ class GAN:
         Optionally adds R1 gradient penalty on real samples.
         """
         if detach_fake:
-            fake_data = fake_data.detach()
+            fake_data = GAN._detach_data(fake_data)
 
         if r1_gamma != 0:
-            real_data.requires_grad_(True)
+            real_data = GAN._set_requires_grad(real_data, True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -247,10 +254,10 @@ class GAN:
         D should output an unconstrained scalar (no sigmoid).
         """
         if detach_fake:
-            fake_data = fake_data.detach()
+            fake_data = GAN._detach_data(fake_data)
 
         if r1_gamma != 0:
-            real_data.requires_grad_(True)
+            real_data = GAN._set_requires_grad(real_data, True)
 
         logits_real = discriminator(real_data)
         logits_fake = discriminator(fake_data)
@@ -294,9 +301,7 @@ class GAN:
         L_D = E[D(fake)] - E[D(real)] + λ * E[(||∇_x̂ D(x̂)||_2 - c)^2]
         """
         if detach_fake:
-            fake_data = fake_data.detach()
-
-        device = real_data.device
+            fake_data = GAN._detach_data(fake_data)
 
         # Forward on real/fake
         logits_real = discriminator(real_data)
@@ -308,22 +313,29 @@ class GAN:
         if isinstance(logits_fake, ValueStep):
             logits_fake = logits_fake.value
 
-        loss_wgan = logits_real.mean() - logits_fake.mean()
+        loss_wgan = logits_fake.mean() - logits_real.mean()
 
         # Interpolate
 
         if isinstance(real_data, torch.Tensor):
+            if not isinstance(fake_data, torch.Tensor):
+                raise TypeError("fake_data must match real_data type")
             bsz = real_data.size(0)
             eps_shape = [bsz] + [1] * (real_data.dim() - 1)  # broadcastable
-            eps = torch.rand(eps_shape, device=device, dtype=real_data.dtype)
+            eps = torch.rand(eps_shape, device=real_data.device, dtype=real_data.dtype)
             x_hat = (eps * real_data + (1.0 - eps) * fake_data).detach().requires_grad_(True)
         elif isinstance(real_data, dict):
-            bsz = next(iter(real_data.values())).size(0)
-            eps_shape = [bsz] + [1] * (next(iter(real_data.values())).dim() - 1)
-            eps = torch.rand(eps_shape, device=device, dtype=next(iter(real_data.values())).dtype)
+            if not isinstance(fake_data, dict):
+                raise TypeError("fake_data must match real_data type")
             x_hat = {}
             for key in real_data.keys():
-                x_hat[key] = (eps * real_data[key] + (1.0 - eps) * fake_data[key]).detach().requires_grad_(True)
+                real_value = real_data[key]
+                fake_value = fake_data[key]
+                eps_shape = [real_value.size(0)] + [1] * (real_value.dim() - 1)
+                eps = torch.rand(eps_shape, device=real_value.device, dtype=real_value.dtype)
+                x_hat[key] = (eps * real_value + (1.0 - eps) * fake_value).detach().requires_grad_(True)
+        else:
+            raise TypeError("real_data must be a Tensor or dict[str, Tensor]")
 
         d_hat = discriminator(x_hat)
         if isinstance(d_hat, ValueStep):

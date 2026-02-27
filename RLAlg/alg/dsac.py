@@ -42,7 +42,7 @@ class DSAC:
         gamma: float,
         td_bound: float
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
+        done = done.to(dtype=reward.dtype, device=reward.device)
         q_target = reward + (1 - done) * gamma * (q_next - alpha * next_log_prob)
         difference = torch.clamp(q_target - q, -td_bound, td_bound)
         q_target_bound = q + difference

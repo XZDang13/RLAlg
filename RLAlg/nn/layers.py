@@ -23,7 +23,7 @@ class MLPLayer(nn.Module):
     ) -> None:
         super().__init__()
         if activate_func is None:
-            activate_func = nn.ReLU()
+            activate_func = nn.Identity()
         if not isinstance(norm_position, NormPosition):
             raise TypeError(f"norm_position must be NormPosition, got {type(norm_position)}.")
 
@@ -50,51 +50,81 @@ class MLPLayer(nn.Module):
         return x
     
 class Conv1DLayer(nn.Module):
-    def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func: nn.Module = nn.ReLU(), norm:bool=False) -> None:
-        super(Conv1DLayer, self).__init__()
-        bias = not norm
-        self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
-        self.norm = nn.InstanceNorm1d(out_channel) if norm else nn.Identity()
+    def __init__(
+        self,
+        in_channel: int,
+        out_channel: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        activate_func: Optional[nn.Module] = None,
+        norm_position: NormPosition = NormPosition.NONE,
+    ) -> None:
+        super().__init__()
+        if activate_func is None:
+            activate_func = nn.Identity()
+        if not isinstance(norm_position, NormPosition):
+            raise TypeError(f"norm_position must be NormPosition, got {type(norm_position)}.")
 
+        use_norm = norm_position is not NormPosition.NONE
+        self.pre_norm = nn.InstanceNorm1d(in_channel) if use_norm and norm_position is NormPosition.PRE else nn.Identity()
+        self.post_norm = nn.InstanceNorm1d(out_channel) if use_norm and norm_position is NormPosition.POST else nn.Identity()
+        self.conv1d = nn.Conv1d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=not use_norm)
         self.activate_func = activate_func
 
         self.reset_parameters()
 
     def reset_parameters(self):
         weight_init(self.conv1d)
-        if not isinstance(self.norm, nn.Identity):
-            self.norm.reset_parameters()
+        if not isinstance(self.pre_norm, nn.Identity):
+            self.pre_norm.reset_parameters()
+        if not isinstance(self.post_norm, nn.Identity):
+            self.post_norm.reset_parameters()
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre_norm(x)
         x = self.conv1d(x)
-        x = self.norm(x)
+        x = self.post_norm(x)
         x = self.activate_func(x)
-        
         return x
     
 class Conv2DLayer(nn.Module):
-    def __init__(self, in_channel:int, out_channel:int, kernel_size:int=3, stride:int=1,
-                 padding:int=1, activate_func: nn.Module = nn.ReLU(), norm:bool=False) -> None:
-        super(Conv2DLayer, self).__init__()
-        bias = not norm
-        self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
-        self.norm = nn.InstanceNorm2d(out_channel) if norm else nn.Identity()
+    def __init__(
+        self,
+        in_channel: int,
+        out_channel: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        activate_func: Optional[nn.Module] = None,
+        norm_position: NormPosition = NormPosition.NONE,
+    ) -> None:
+        super().__init__()
+        if activate_func is None:
+            activate_func = nn.Identity()
+        if not isinstance(norm_position, NormPosition):
+            raise TypeError(f"norm_position must be NormPosition, got {type(norm_position)}.")
 
+        use_norm = norm_position is not NormPosition.NONE
+        self.pre_norm = nn.InstanceNorm2d(in_channel) if use_norm and norm_position is NormPosition.PRE else nn.Identity()
+        self.post_norm = nn.InstanceNorm2d(out_channel) if use_norm and norm_position is NormPosition.POST else nn.Identity()
+        self.conv2d = nn.Conv2d(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=not use_norm)
         self.activate_func = activate_func
 
         self.reset_parameters()
 
     def reset_parameters(self):
         weight_init(self.conv2d)
-        if not isinstance(self.norm, nn.Identity):
-            self.norm.reset_parameters()
+        if not isinstance(self.pre_norm, nn.Identity):
+            self.pre_norm.reset_parameters()
+        if not isinstance(self.post_norm, nn.Identity):
+            self.post_norm.reset_parameters()
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre_norm(x)
         x = self.conv2d(x)
-        x = self.norm(x)
+        x = self.post_norm(x)
         x = self.activate_func(x)
-        
         return x
     
 class DeterministicHead(nn.Module):
@@ -232,8 +262,10 @@ class GaussianHead(nn.Module):
         base_pi = Normal(mu, std)
         pi = TransformedDistribution(base_pi, self.transform)
 
+        sampled_action = False
         if action is None:
             action = pi.rsample()
+            sampled_action = True
             
         if self.max_action is not None:
             eps = 1e-6
@@ -244,11 +276,11 @@ class GaussianHead(nn.Module):
         # deterministic mu after squashing if needed
         if self.max_action is not None:
             mu_squashed = self.max_action * torch.tanh(mu)
-            #entropy = -log_prob
-            entropy = pi.base_dist.entropy()
+            entropy_action = action if sampled_action else pi.rsample()
+            entropy = -pi.log_prob(entropy_action).sum(axis=-1)
         else:
             mu_squashed = mu
-            entropy = pi.base_dist.entropy()
+            entropy = base_pi.entropy().sum(axis=-1)
 
         step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 

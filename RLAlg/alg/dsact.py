@@ -46,7 +46,7 @@ class DSACT:
         alpha: float,
         gamma: float
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
+        done = done.to(dtype=reward.dtype, device=reward.device)
         q_targ = reward + (1 - done) * gamma * (q_next - alpha * next_log_prob)
         q_targ_sample = reward + (1 - done) * gamma * (q_next_sample - alpha * next_log_prob)
 
@@ -62,15 +62,20 @@ class DSACT:
         q2_std: torch.Tensor,
         tau_b: float
     ):
+        q1_mean = q1_std.detach().mean()
+        q2_mean = q2_std.detach().mean()
+
         if DSACT.q1_mean_std is None:
-            DSACT.q1_mean_std = q1_std.detach().mean()
+            DSACT.q1_mean_std = q1_mean
         else:
-            DSACT.q1_mean_std = (1 - tau_b) * DSACT.q1_mean_std + tau_b * q1_std.detach().mean()
+            q1_prev = torch.as_tensor(DSACT.q1_mean_std, dtype=q1_mean.dtype, device=q1_mean.device)
+            DSACT.q1_mean_std = (1 - tau_b) * q1_prev + tau_b * q1_mean
 
         if DSACT.q2_mean_std is None:
-            DSACT.q2_mean_std = q2_std.detach().mean()
+            DSACT.q2_mean_std = q2_mean
         else:
-            DSACT.q2_mean_std = (1 - tau_b) * DSACT.q2_mean_std + tau_b * q2_std.detach().mean()
+            q2_prev = torch.as_tensor(DSACT.q2_mean_std, dtype=q2_mean.dtype, device=q2_mean.device)
+            DSACT.q2_mean_std = (1 - tau_b) * q2_prev + tau_b * q2_mean
 
     @staticmethod
     def compute_critic_loss(

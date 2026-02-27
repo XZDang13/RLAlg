@@ -2,19 +2,30 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-import wandb
+try:
+    import wandb
+except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in tests
+    wandb = None
 
 class WandbLogger:
     @staticmethod
+    def _require_wandb():
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install wandb to use WandbLogger.")
+
+    @staticmethod
     def init_project(project_name:str, name:str|None=None, config:dict|None=None):
+        WandbLogger._require_wandb()
         wandb.init(project=project_name, name=name, config=config)
         
     @staticmethod
     def log_metrics(metrics:dict, step:int):
+        WandbLogger._require_wandb()
         wandb.log(metrics, step=step)
 
     @staticmethod
     def finish_project():
+        WandbLogger._require_wandb()
         wandb.finish()
 
 
@@ -41,7 +52,15 @@ class MetricsTracker:
             values = torch.from_numpy(values).float()
 
         if self._types[name] == MetricsTracker.List:
-            self._storages[name].append(values.item())
+            if isinstance(values, torch.Tensor):
+                if values.numel() != 1:
+                    raise ValueError(f"List metric '{name}' requires a scalar tensor, got shape {tuple(values.shape)}.")
+                scalar = values.item()
+            elif isinstance(values, (int, float)):
+                scalar = values
+            else:
+                raise TypeError(f"Unsupported value type for list metric '{name}': {type(values)}")
+            self._storages[name].append(float(scalar))
         elif self._types[name] == MetricsTracker.Tensor:
             self._storages[name] += values 
 
