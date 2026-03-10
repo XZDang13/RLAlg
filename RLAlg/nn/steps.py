@@ -34,3 +34,11 @@ class DistributionStep:
     mean: torch.Tensor
     std: torch.Tensor | float
     sample: torch.Tensor
+    
+@dataclass
+class FPOStep:
+    action: torch.Tensor
+    action_path: torch.Tensor|None = None
+    eps: torch.Tensor|None = None
+    time_step: torch.Tensor|None = None
+    init_cmf_loss: torch.Tensor|None = None
