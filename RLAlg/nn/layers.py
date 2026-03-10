@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal, Categorical, TanhTransform, AffineTransform, TransformedDistribution, ComposeTransform
 
-from build.lib.RLAlg.nn.layers import make_mlp_layers
 from .steps import DiscretePolicyStep, StochasticContinuousPolicyStep, DeterministicContinuousPolicyStep, ValueStep, DistributionStep
 from ..utils import weight_init
 
@@ -567,10 +566,11 @@ class DistributeCriticHead(nn.Module):
         return step
 
 class DiffusionHead(nn.Module):
-    def __init__(self, in_dim:int, action_dim:int) -> None:
+    def __init__(self, in_dim:int, action_dim:int, scale:float=1.0) -> None:
         super().__init__()
         
         self.predict_layer = nn.Linear(in_dim, action_dim)
+        self.scale = scale
         self.reset_parameters()
         
     def reset_parameters(self):
@@ -579,7 +579,7 @@ class DiffusionHead(nn.Module):
             nn.init.uniform_(self.predict_layer.bias, -3e-3, 3e-3)
         
     def forward(self, x: torch.Tensor) -> ValueStep:
-        value = self.predict_layer(x)
+        value = self.predict_layer(x) * self.scale
 
         step = ValueStep(value=value)
         

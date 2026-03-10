@@ -28,7 +28,7 @@ class EulerODESolver:
     @staticmethod
     def _call_model(
         model: NNMODEL,
-        obs: torch.Tensor,
+        obs: torch.Tensor | dict[str, torch.Tensor],
         current_action: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
@@ -54,22 +54,33 @@ class EulerODESolver:
     @staticmethod
     def denoise(
         model: NNMODEL,
-        sample_steps: int,
-        obs: torch.Tensor,
-        init_noise: torch.Tensor,
-        deterministic: bool = False
+        flow_steps: int | None = None,
+        obs: torch.Tensor | dict[str, torch.Tensor] | None = None,
+        init_noise: torch.Tensor | None = None,
+        deterministic: bool = False,
+        sample_steps: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if sample_steps <= 0:
-            raise ValueError(f"sample_steps must be > 0, got {sample_steps}.")
+        if flow_steps is None:
+            flow_steps = sample_steps
+        elif sample_steps is not None and sample_steps != flow_steps:
+            raise ValueError(
+                f"flow_steps and sample_steps must match when both are provided, got {flow_steps} and {sample_steps}."
+            )
+        if flow_steps is None:
+            raise ValueError("flow_steps must be provided.")
+        if flow_steps <= 0:
+            raise ValueError(f"flow_steps must be > 0, got {flow_steps}.")
+        if obs is None:
+            raise ValueError("obs must be provided.")
         if not torch.is_tensor(init_noise):
             raise TypeError(f"init_noise must be a torch.Tensor, got {type(init_noise)}.")
 
         denoised_x = init_noise
         denoised_path = [denoised_x]
-        dt = 1.0 / float(sample_steps)
+        dt = 1.0 / float(flow_steps)
 
         batch_size = denoised_x.shape[0] if denoised_x.ndim > 0 else 1
-        for step_idx in range(sample_steps):
+        for step_idx in range(flow_steps):
             t_value = 1.0 - step_idx * dt
             t_tensor = torch.full(
                 (batch_size, 1),
