@@ -448,10 +448,10 @@ class GaussianHead(nn.Module):
                 entropy_pre_tanh = base_pi.rsample()
                 entropy_squashed = torch.tanh(entropy_pre_tanh)
                 entropy_log_det = torch.log(max_action * (1 - entropy_squashed.pow(2)) + eps)
-                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).sum(axis=-1)
+                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).mean()
         else:
             mu_squashed = mu
-            entropy = base_pi.entropy().sum(axis=-1)
+            entropy = base_pi.entropy().mean()
 
         step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 
