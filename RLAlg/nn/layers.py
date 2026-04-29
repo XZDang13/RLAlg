@@ -584,5 +584,3 @@ class DiffusionHead(nn.Module):
         step = ValueStep(value=value)
         
         return step
-        
-    

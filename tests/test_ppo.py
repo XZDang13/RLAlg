@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 from RLAlg.alg.ppo import PPO
-from RLAlg.nn.steps import DiscretePolicyStep, ValueStep
+from RLAlg.nn.steps import DiscretePolicyStep, StochasticContinuousPolicyStep, ValueStep
 
 
 class DummyDiscretePolicy(nn.Module):
@@ -31,6 +31,23 @@ class DummyValueModel(nn.Module):
 
     def forward(self, observations):
         return ValueStep(value=self.values)
+
+
+class DummyContinuousPolicy(nn.Module):
+    def __init__(self, log_prob: torch.Tensor, log_std: torch.Tensor):
+        super().__init__()
+        self.log_prob = log_prob
+        self.log_std = log_std
+
+    def forward(self, observations, actions):
+        return StochasticContinuousPolicyStep(
+            pi=None,
+            action=actions,
+            log_prob=self.log_prob,
+            mean=torch.zeros_like(actions, dtype=self.log_prob.dtype),
+            log_std=self.log_std,
+            entropy=torch.ones_like(self.log_prob),
+        )
 
 
 class DummyRecurrentDiscretePolicy(nn.Module):
@@ -159,6 +176,49 @@ def test_compute_policy_loss_with_multi_critic_returns_tensor_loss():
     )
 
     assert isinstance(output["loss"], torch.Tensor)
+
+
+def test_compute_policy_loss_returns_trainer_metrics_for_continuous_policy():
+    ratio = torch.tensor([1.25, 0.70])
+    log_std = torch.log(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    advantages = torch.tensor([1.0, 3.0])
+    model = DummyContinuousPolicy(log_prob=torch.log(ratio), log_std=log_std)
+
+    output = PPO.compute_policy_loss(
+        policy_model=model,
+        log_probs_hat=torch.zeros_like(ratio),
+        observations=torch.zeros(2, 1),
+        actions=torch.zeros(2, 2),
+        advantages=advantages,
+        clip_ratio=0.2,
+    )
+
+    assert torch.allclose(output["policy_clip_fraction"], torch.tensor(1.0))
+    assert torch.allclose(output["action_log_std"], log_std.mean())
+    assert torch.allclose(output["action_std"], torch.tensor(2.5))
+    assert torch.allclose(output["advantage_mean"], advantages.mean())
+    assert torch.allclose(output["advantage_std"], advantages.std(unbiased=False))
+
+
+def test_compute_clipped_value_loss_returns_trainer_metrics():
+    values = torch.tensor([1.30, 0.90, 1.00])
+    values_hat = torch.tensor([1.00, 1.00, 1.00])
+    returns = torch.tensor([1.00, 2.00, 3.00])
+    value_model = DummyValueModel(values=values)
+
+    output = PPO.compute_clipped_value_loss(
+        value_model=value_model,
+        observations=torch.zeros(3, 1),
+        values_hat=values_hat,
+        returns=returns,
+        clip_ratio=0.2,
+    )
+
+    residual = returns - values
+    expected_explained_variance = 1.0 - residual.var(unbiased=False) / returns.var(unbiased=False)
+
+    assert torch.allclose(output["value_explained_variance"], expected_explained_variance)
+    assert torch.allclose(output["value_clip_fraction"], torch.tensor(1.0 / 3.0))
 
 
 def test_compute_policy_loss_recurrent_matches_feedforward_for_t1():

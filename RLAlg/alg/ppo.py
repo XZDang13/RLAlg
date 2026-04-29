@@ -42,6 +42,115 @@ class PPO:
         return (values * valid_mask).sum() / denominator
 
     @staticmethod
+    def _reduce_to_reference_shape(values: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        if values.shape == reference.shape:
+            return values
+        if values.ndim > reference.ndim and values.shape[:reference.ndim] == reference.shape:
+            return values.reshape(*reference.shape, -1).mean(dim=-1)
+        return values
+
+    @staticmethod
+    def _masked_std(values: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        mean = PPO._masked_mean(values, valid_mask)
+        variance = PPO._masked_mean((values - mean) ** 2, valid_mask)
+        return torch.sqrt(torch.clamp(variance, min=0.0))
+
+    @staticmethod
+    def _policy_clip_fraction(
+        ratio: torch.Tensor,
+        clip_ratio: float,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        clipped = (torch.abs(ratio - 1.0) > clip_ratio).to(dtype=ratio.dtype)
+        return PPO._masked_mean(clipped, valid_mask).detach()
+
+    @staticmethod
+    def _policy_action_stats(
+        step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep],
+        reference: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        zero = torch.zeros((), dtype=reference.dtype, device=reference.device)
+        if not isinstance(step, StochasticContinuousPolicyStep):
+            return {
+                "action_log_std": zero,
+                "action_std": zero,
+            }
+
+        log_std = PPO._reduce_to_reference_shape(step.log_std, reference)
+        action_std = PPO._reduce_to_reference_shape(torch.exp(step.log_std), reference)
+        if log_std.shape == reference.shape:
+            action_log_std = PPO._masked_mean(log_std, valid_mask)
+        else:
+            action_log_std = log_std.mean()
+        if action_std.shape == reference.shape:
+            action_std_mean = PPO._masked_mean(action_std, valid_mask)
+        else:
+            action_std_mean = action_std.mean()
+
+        return {
+            "action_log_std": action_log_std.detach(),
+            "action_std": action_std_mean.detach(),
+        }
+
+    @staticmethod
+    def _policy_advantage_stats(
+        advantages: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "advantage_mean": PPO._masked_mean(advantages, valid_mask).detach(),
+            "advantage_std": PPO._masked_std(advantages, valid_mask).detach(),
+        }
+
+    @staticmethod
+    def _policy_metric_payload(
+        step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep],
+        ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        clip_ratio: float,
+        valid_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "policy_clip_fraction": PPO._policy_clip_fraction(ratio, clip_ratio, valid_mask),
+            **PPO._policy_action_stats(step, ratio, valid_mask),
+            **PPO._policy_advantage_stats(advantages, valid_mask),
+        }
+
+    @staticmethod
+    def _explained_variance(
+        values: torch.Tensor,
+        returns: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        values = values.float()
+        returns = returns.float()
+        mask = None if valid_mask is None else valid_mask.to(dtype=returns.dtype, device=returns.device)
+
+        residual = returns - values
+        returns_mean = PPO._masked_mean(returns, mask)
+        residual_mean = PPO._masked_mean(residual, mask)
+        returns_var = PPO._masked_mean((returns - returns_mean) ** 2, mask)
+        residual_var = PPO._masked_mean((residual - residual_mean) ** 2, mask)
+        eps = torch.finfo(returns.dtype).eps
+        explained = torch.where(
+            returns_var > eps,
+            1.0 - residual_var / torch.clamp(returns_var, min=eps),
+            torch.zeros_like(returns_var),
+        )
+        return explained.detach()
+
+    @staticmethod
+    def _value_clip_fraction(
+        values: torch.Tensor,
+        values_hat: torch.Tensor,
+        clip_ratio: float,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        clipped = (torch.abs(values - values_hat) > clip_ratio).to(dtype=values.dtype)
+        return PPO._masked_mean(clipped, valid_mask).detach()
+
+    @staticmethod
     def _unpack_recurrent_output(model_output: Any) -> tuple[Any, Any | None]:
         if isinstance(model_output, tuple):
             if len(model_output) != 2:
@@ -83,9 +192,11 @@ class PPO:
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
 
         loss = torch.zeros((), dtype=log_probs.dtype, device=log_probs.device)
+        weighted_advantages = torch.zeros_like(log_probs)
         for weight, advantages in zip(weights, advantages_list):
             PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
             loss += -torch.min(ratio * advantages, clipped_ratio * advantages).mean() * weight
+            weighted_advantages += advantages * weight
 
         if isinstance(step, StochasticContinuousPolicyStep):
             loss += step.mean.pow(2).mean() * regularization_weight
@@ -95,7 +206,8 @@ class PPO:
         return {
             "loss": loss,
             "entropy": entropy,
-            "kl_divergence": kl_divergence
+            "kl_divergence": kl_divergence,
+            **PPO._policy_metric_payload(step, ratio, weighted_advantages, clip_ratio),
         }
 
     @staticmethod
@@ -127,7 +239,8 @@ class PPO:
         return {
             "loss": loss,
             "entropy": entropy,
-            "kl_divergence": kl_divergence
+            "kl_divergence": kl_divergence,
+            **PPO._policy_metric_payload(step, ratio, advantages, clip_ratio),
         }
 
     @staticmethod
@@ -141,7 +254,9 @@ class PPO:
         PPO._validate_same_shape("values", values, "returns", returns)
         loss = 0.5 * ((returns - values) ** 2).mean()
         return {
-            "loss": loss
+            "loss": loss,
+            "value_explained_variance": PPO._explained_variance(values, returns),
+            "value_clip_fraction": torch.zeros((), dtype=values.dtype, device=values.device),
         }
 
     @staticmethod
@@ -184,6 +299,7 @@ class PPO:
             "loss": loss,
             "entropy": entropy,
             "kl_divergence": kl_divergence,
+            **PPO._policy_metric_payload(step, ratio, advantages, clip_ratio, valid_mask),
             "next_state": next_state,
         }
 
@@ -214,10 +330,12 @@ class PPO:
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
 
         loss = torch.zeros((), dtype=log_probs.dtype, device=log_probs.device)
+        weighted_advantages = torch.zeros_like(log_probs)
         for weight, advantages in zip(weights, advantages_list):
             PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
             objective = torch.min(ratio * advantages, clipped_ratio * advantages)
             loss += -PPO._masked_mean(objective, valid_mask) * weight
+            weighted_advantages += advantages * weight
 
         entropy = PPO._masked_mean(step.entropy, valid_mask)
 
@@ -232,6 +350,7 @@ class PPO:
             "loss": loss,
             "entropy": entropy,
             "kl_divergence": kl_divergence,
+            **PPO._policy_metric_payload(step, ratio, weighted_advantages, clip_ratio, valid_mask),
             "next_state": next_state,
         }
 
@@ -256,6 +375,8 @@ class PPO:
         loss = PPO._masked_mean(loss, valid_mask)
         return {
             "loss": loss,
+            "value_explained_variance": PPO._explained_variance(values, returns, valid_mask),
+            "value_clip_fraction": torch.zeros((), dtype=values.dtype, device=values.device),
             "next_state": next_state,
         }
 
@@ -287,6 +408,8 @@ class PPO:
 
         return {
             "loss": loss,
+            "value_explained_variance": PPO._explained_variance(values, returns, valid_mask),
+            "value_clip_fraction": PPO._value_clip_fraction(values, values_hat, clip_ratio, valid_mask),
             "next_state": next_state,
         }
 
@@ -312,5 +435,7 @@ class PPO:
         loss = loss.mean()
 
         return {
-            "loss": loss
+            "loss": loss,
+            "value_explained_variance": PPO._explained_variance(values, returns),
+            "value_clip_fraction": PPO._value_clip_fraction(values, values_hat, clip_ratio),
         }
