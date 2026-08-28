@@ -443,15 +443,15 @@ class GaussianHead(nn.Module):
         if max_action is not None:
             mu_squashed = max_action * torch.tanh(mu)
             if sampled_action:
-                entropy = -log_prob
+                entropy = -log_prob / mu.shape[-1]
             else:
                 entropy_pre_tanh = base_pi.rsample()
                 entropy_squashed = torch.tanh(entropy_pre_tanh)
                 entropy_log_det = torch.log(max_action * (1 - entropy_squashed.pow(2)) + eps)
-                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).mean()
+                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).mean(dim=-1)
         else:
             mu_squashed = mu
-            entropy = base_pi.entropy().mean()
+            entropy = base_pi.entropy().mean(dim=-1)
 
         step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 

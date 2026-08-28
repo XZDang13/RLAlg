@@ -30,3 +30,34 @@ def test_wandb_logger_raises_when_wandb_unavailable(monkeypatch):
 
     with pytest.raises(ImportError, match="wandb is not installed"):
         WandbLogger.init_project("proj")
+
+
+def test_wandb_logger_forwards_init_options_and_returns_run(monkeypatch):
+    expected = object()
+
+    class FakeWandb:
+        def init(self, **kwargs):
+            self.kwargs = kwargs
+            return expected
+
+    fake = FakeWandb()
+    monkeypatch.setattr(logger_module, "wandb", fake)
+
+    actual = WandbLogger.init_project(
+        "stage-b",
+        name="e3-seed-1234",
+        config={"seed": 1234},
+        mode="offline",
+        group="wp3",
+        tags=["e3"],
+    )
+
+    assert actual is expected
+    assert fake.kwargs == {
+        "project": "stage-b",
+        "name": "e3-seed-1234",
+        "config": {"seed": 1234},
+        "mode": "offline",
+        "group": "wp3",
+        "tags": ["e3"],
+    }

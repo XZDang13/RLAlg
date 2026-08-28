@@ -85,7 +85,7 @@ class DummyRecurrentValueModel(nn.Module):
 def test_compute_policy_loss_raises_on_shape_mismatch():
     model = DummyDiscretePolicy(
         log_prob=torch.tensor([[0.1], [0.2]]),
-        entropy=torch.tensor([0.3, 0.4]),
+        entropy=torch.tensor([[0.3], [0.4]]),
     )
 
     with pytest.raises(ValueError, match="same shape"):
@@ -162,7 +162,7 @@ def test_compute_policy_loss_with_multi_critic_raises_on_empty_lists():
 def test_compute_policy_loss_with_multi_critic_returns_tensor_loss():
     model = DummyDiscretePolicy(
         log_prob=torch.tensor([[0.1], [0.2]]),
-        entropy=torch.tensor([0.3, 0.4]),
+        entropy=torch.tensor([[0.3], [0.4]]),
     )
 
     output = PPO.compute_policy_loss_with_multi_critic(
@@ -176,6 +176,43 @@ def test_compute_policy_loss_with_multi_critic_returns_tensor_loss():
     )
 
     assert isinstance(output["loss"], torch.Tensor)
+
+
+def test_compute_policy_loss_with_multi_critic_applies_entropy_bonus():
+    entropy = torch.tensor([2.0, 4.0])
+    model = DummyDiscretePolicy(log_prob=torch.zeros(2), entropy=entropy)
+
+    output = PPO.compute_policy_loss_with_multi_critic(
+        policy_model=model,
+        log_probs_hat=torch.zeros(2),
+        observations=torch.zeros(2, 1),
+        actions=torch.zeros(2, dtype=torch.long),
+        advantages_list=[torch.ones(2)],
+        weights=[1.0],
+        clip_ratio=0.2,
+        entropy_coef=0.1,
+    )
+
+    torch.testing.assert_close(output["entropy"], torch.tensor(3.0))
+    torch.testing.assert_close(output["loss"], torch.tensor(-1.3))
+
+
+def test_compute_policy_loss_applies_entropy_bonus():
+    entropy = torch.tensor([2.0, 4.0])
+    model = DummyDiscretePolicy(log_prob=torch.zeros(2), entropy=entropy)
+
+    output = PPO.compute_policy_loss(
+        policy_model=model,
+        log_probs_hat=torch.zeros(2),
+        observations=torch.zeros(2, 1),
+        actions=torch.zeros(2, dtype=torch.long),
+        advantages=torch.ones(2),
+        clip_ratio=0.2,
+        entropy_coef=0.1,
+    )
+
+    torch.testing.assert_close(output["entropy"], torch.tensor(3.0))
+    torch.testing.assert_close(output["loss"], torch.tensor(-1.3))
 
 
 def test_compute_policy_loss_returns_trainer_metrics_for_continuous_policy():
@@ -272,10 +309,11 @@ def test_compute_policy_loss_recurrent_applies_valid_mask():
         clip_ratio=10.0,
         episode_starts=torch.zeros_like(log_prob, dtype=torch.bool),
         valid_mask=mask,
+        entropy_coef=0.1,
     )
 
-    expected_loss = -torch.exp(log_prob)[mask].mean()
     expected_entropy = entropy[mask].mean()
+    expected_loss = -torch.exp(log_prob)[mask].mean() - 0.1 * expected_entropy
     expected_kl = (((torch.exp(log_prob) - 1.0) - log_prob)[mask]).mean()
 
     assert torch.allclose(output["loss"], expected_loss)
@@ -304,6 +342,29 @@ def test_compute_policy_loss_recurrent_accepts_dict_observations():
 
     assert isinstance(model.last_observations, dict)
     assert torch.isfinite(output["loss"])
+
+
+def test_compute_policy_loss_with_multi_critic_recurrent_applies_masked_entropy_bonus():
+    log_prob = torch.zeros(2, 2)
+    entropy = torch.tensor([[1.0, 2.0], [3.0, 100.0]])
+    mask = torch.tensor([[True, True], [True, False]])
+    model = DummyRecurrentDiscretePolicy(log_prob=log_prob, entropy=entropy)
+
+    output = PPO.compute_policy_loss_with_multi_critic_recurrent(
+        policy_model=model,
+        log_probs_hat=torch.zeros_like(log_prob),
+        observations=torch.zeros(2, 2, 1),
+        actions=torch.zeros(2, 2, dtype=torch.long),
+        advantages_list=[torch.ones_like(log_prob)],
+        weights=[1.0],
+        clip_ratio=0.2,
+        episode_starts=torch.zeros_like(log_prob, dtype=torch.bool),
+        valid_mask=mask,
+        entropy_coef=0.1,
+    )
+
+    torch.testing.assert_close(output["entropy"], torch.tensor(2.0))
+    torch.testing.assert_close(output["loss"], torch.tensor(-1.2))
 
 
 def test_compute_policy_loss_with_multi_critic_recurrent_raises_on_length_mismatch():

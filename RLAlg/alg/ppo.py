@@ -180,12 +180,14 @@ class PPO:
         advantages_list: list[torch.Tensor],
         weights: list[float],
         clip_ratio: float,
+        entropy_coef: float = 0.0,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
         PPO._validate_multi_critic_inputs(weights, advantages_list)
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
         PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
+        PPO._validate_same_shape("entropy", step.entropy, "log_probs", log_probs)
         entropy = step.entropy.mean()
 
         ratio = (log_probs - log_probs_hat).exp()
@@ -197,6 +199,7 @@ class PPO:
             PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
             loss += -torch.min(ratio * advantages, clipped_ratio * advantages).mean() * weight
             weighted_advantages += advantages * weight
+        loss -= entropy_coef * entropy
 
         if isinstance(step, StochasticContinuousPolicyStep):
             loss += step.mean.pow(2).mean() * regularization_weight
@@ -218,18 +221,21 @@ class PPO:
         actions: torch.Tensor,
         advantages: torch.Tensor,
         clip_ratio: float,
+        entropy_coef: float = 0.0,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
         step: Union[StochasticContinuousPolicyStep, DiscretePolicyStep] = policy_model(observations, actions)
         log_probs = step.log_prob
         PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
         PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
+        PPO._validate_same_shape("entropy", step.entropy, "log_probs", log_probs)
         entropy = step.entropy.mean()
 
         ratio = (log_probs - log_probs_hat).exp()
         clipped_ratio = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
 
         loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        loss -= entropy_coef * entropy
 
         if isinstance(step, StochasticContinuousPolicyStep):
             loss += step.mean.pow(2).mean() * regularization_weight
@@ -270,6 +276,7 @@ class PPO:
         episode_starts: torch.Tensor,
         initial_state: Any | None = None,
         valid_mask: torch.Tensor | None = None,
+        entropy_coef: float = 0.0,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor | Any]:
         model_output = policy_model(observations, actions, initial_state, episode_starts)
@@ -279,6 +286,7 @@ class PPO:
         PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
         PPO._validate_same_shape("log_probs", log_probs, "advantages", advantages)
         PPO._validate_same_shape("log_probs", log_probs, "episode_starts", episode_starts)
+        PPO._validate_same_shape("entropy", step.entropy, "log_probs", log_probs)
         valid_mask = PPO._prepare_valid_mask(log_probs, valid_mask)
 
         ratio = (log_probs - log_probs_hat).exp()
@@ -287,6 +295,7 @@ class PPO:
 
         loss = -PPO._masked_mean(policy_objective, valid_mask)
         entropy = PPO._masked_mean(step.entropy, valid_mask)
+        loss -= entropy_coef * entropy
 
         if isinstance(step, StochasticContinuousPolicyStep):
             reg_term = step.mean.pow(2).reshape(*log_probs.shape, -1).mean(dim=-1)
@@ -315,6 +324,7 @@ class PPO:
         episode_starts: torch.Tensor,
         initial_state: Any | None = None,
         valid_mask: torch.Tensor | None = None,
+        entropy_coef: float = 0.0,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor | Any]:
         PPO._validate_multi_critic_inputs(weights, advantages_list)
@@ -324,6 +334,7 @@ class PPO:
 
         PPO._validate_same_shape("log_probs", log_probs, "log_probs_hat", log_probs_hat)
         PPO._validate_same_shape("log_probs", log_probs, "episode_starts", episode_starts)
+        PPO._validate_same_shape("entropy", step.entropy, "log_probs", log_probs)
         valid_mask = PPO._prepare_valid_mask(log_probs, valid_mask)
 
         ratio = (log_probs - log_probs_hat).exp()
@@ -338,6 +349,7 @@ class PPO:
             weighted_advantages += advantages * weight
 
         entropy = PPO._masked_mean(step.entropy, valid_mask)
+        loss -= entropy_coef * entropy
 
         if isinstance(step, StochasticContinuousPolicyStep):
             reg_term = step.mean.pow(2).reshape(*log_probs.shape, -1).mean(dim=-1)

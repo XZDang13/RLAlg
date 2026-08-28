@@ -14,9 +14,14 @@ class WandbLogger:
             raise ImportError("wandb is not installed. Install wandb to use WandbLogger.")
 
     @staticmethod
-    def init_project(project_name:str, name:str|None=None, config:dict|None=None):
+    def init_project(
+        project_name: str,
+        name: str | None = None,
+        config: dict | None = None,
+        **kwargs,
+    ):
         WandbLogger._require_wandb()
-        wandb.init(project=project_name, name=name, config=config)
+        return wandb.init(project=project_name, name=name, config=config, **kwargs)
         
     @staticmethod
     def log_metrics(metrics:dict, step:int):

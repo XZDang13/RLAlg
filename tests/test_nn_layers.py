@@ -20,7 +20,7 @@ def test_gaussian_head_bounded_entropy_differs_from_base_gaussian_entropy():
     x = torch.randn(256, 4)
 
     step = head(x)
-    base_entropy = step.pi.base_dist.entropy().sum(dim=-1)
+    base_entropy = step.pi.base_dist.entropy().mean(dim=-1)
     entropy_gap = torch.abs(step.entropy - base_entropy).mean()
 
     assert entropy_gap > 1e-3
@@ -32,9 +32,40 @@ def test_gaussian_head_unbounded_entropy_matches_base_distribution():
     x = torch.randn(128, 4)
 
     step = head(x)
-    base_entropy = step.pi.base_dist.entropy().sum(dim=-1)
+    base_entropy = step.pi.base_dist.entropy().mean(dim=-1)
 
+    assert step.entropy.shape == (x.shape[0],)
     assert torch.allclose(step.entropy, base_entropy, atol=1e-6, rtol=1e-5)
+
+
+def test_gaussian_head_unbounded_entropy_is_invariant_to_action_dimension():
+    x = torch.zeros(3, 4)
+    two_actions = GaussianHead(
+        feature_dim=4,
+        action_dim=2,
+        log_std=0.0,
+        max_action=None,
+    )(x)
+    twenty_three_actions = GaussianHead(
+        feature_dim=4,
+        action_dim=23,
+        log_std=0.0,
+        max_action=None,
+    )(x)
+
+    torch.testing.assert_close(two_actions.entropy, twenty_three_actions.entropy)
+
+
+def test_gaussian_head_bounded_entropy_with_supplied_action_is_per_sample():
+    torch.manual_seed(0)
+    head = GaussianHead(feature_dim=4, action_dim=2, max_action=1.0)
+    x = torch.randn(128, 4)
+    action = torch.tanh(torch.randn(128, 2))
+
+    step = head(x, action)
+
+    assert step.entropy.shape == (x.shape[0],)
+    assert torch.isfinite(step.entropy).all()
 
 
 def test_gaussian_head_keeps_finite_gradients_at_action_bounds():
