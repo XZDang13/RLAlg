@@ -43,19 +43,51 @@ def compute_gae(
     last_values: torch.Tensor,    # [N]
     gamma: float = 0.99,
     lambda_: float = 0.95,
+    *,
+    truncated: Optional[torch.Tensor] = None,
+    bootstrap_timeouts: bool = False,
 ):
+    """Compute normalized GAE with explicit termination and timeout semantics.
+
+    Timeouts are always episode boundaries.  When ``bootstrap_timeouts`` is
+    enabled, their reward receives the current-value bootstrap convention used
+    by the Isaac Lab RSL-RL integration before the recursion is cut.
+    """
+    if rewards.ndim != 2:
+        raise ValueError(f"rewards must have shape [T, N], got {tuple(rewards.shape)}.")
+    for name, tensor in {"values": values, "terminated": terminated}.items():
+        if tensor.shape != rewards.shape:
+            raise ValueError(
+                f"{name} must have shape {tuple(rewards.shape)}, got {tuple(tensor.shape)}."
+            )
+    if last_values.shape != rewards.shape[1:]:
+        raise ValueError(
+            f"last_values must have shape {tuple(rewards.shape[1:])}, got {tuple(last_values.shape)}."
+        )
+    if truncated is None:
+        truncated = torch.zeros_like(terminated, dtype=torch.bool)
+    elif truncated.shape != rewards.shape:
+        raise ValueError(
+            f"truncated must have shape {tuple(rewards.shape)}, got {tuple(truncated.shape)}."
+        )
+
     T, N = rewards.shape
     advantages = torch.zeros_like(rewards)
     returns = torch.zeros_like(rewards)
 
-    terminated = terminated.to(dtype=rewards.dtype, device=rewards.device)
-    not_term = 1.0 - terminated
+    terminated = terminated.to(dtype=torch.bool, device=rewards.device)
+    truncated = truncated.to(dtype=torch.bool, device=rewards.device)
+    boundaries = terminated | truncated
+    not_boundary = 1.0 - boundaries.to(dtype=rewards.dtype)
+    gae_rewards = rewards
+    if bootstrap_timeouts:
+        gae_rewards = rewards + gamma * values * truncated.to(dtype=rewards.dtype)
     next_value = last_values.to(dtype=rewards.dtype, device=rewards.device)
     next_adv = torch.zeros((N,), dtype=rewards.dtype, device=rewards.device)
 
     for t in reversed(range(T)):
-        delta = rewards[t] + gamma * next_value * not_term[t] - values[t]
-        next_adv = delta + gamma * lambda_ * next_adv * not_term[t]
+        delta = gae_rewards[t] + gamma * next_value * not_boundary[t] - values[t]
+        next_adv = delta + gamma * lambda_ * next_adv * not_boundary[t]
         advantages[t] = next_adv
         next_value = values[t]
 

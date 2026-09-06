@@ -1,5 +1,6 @@
 from typing import Callable, Optional, Union
 from enum import Enum
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -312,7 +313,8 @@ class DeterministicHead(nn.Module):
 class GaussianHead(nn.Module):
     """
     Gaussian policy head.
-    Supports state-independent or state-dependent log_std.
+    Supports legacy log_std or explicit direct std for state-independent noise.
+    State-dependent noise retains its existing log_std network.
     """
     def __init__(
         self,
@@ -324,14 +326,39 @@ class GaussianHead(nn.Module):
         learnable_log_std: bool = True,
         max_action: Union[float,torch.Tensor, None] = None,
         state_dependent_std: bool = False,
+        *,
+        std_parameterization: str = "log_std",
+        init_std: float = 1.0,
+        std_min: float = math.exp(-20.0),
+        std_max: float = math.exp(2.0),
+        learnable_std: bool = True,
     ) -> None:
         super().__init__()
+        if std_parameterization not in {"log_std", "std"}:
+            raise ValueError("std_parameterization must be 'log_std' or 'std'.")
+        if state_dependent_std and std_parameterization != "log_std":
+            raise ValueError("Direct std is only supported for state-independent noise.")
+        self.std_parameterization = std_parameterization
+        if std_parameterization == "std":
+            if not all(math.isfinite(v) for v in (init_std, std_min, std_max)):
+                raise ValueError("init_std, std_min and std_max must be finite.")
+            if not 0.0 < std_min <= init_std <= std_max:
+                raise ValueError("Direct std requires 0 < std_min <= init_std <= std_max.")
+            self.std_min = float(std_min)
+            self.std_max = float(std_max)
 
         self.mu_layer = nn.Linear(feature_dim, action_dim)
 
         self.state_dependent_std = state_dependent_std
         if state_dependent_std:
             self.log_std_layer = nn.Linear(feature_dim, action_dim)
+        elif std_parameterization == "std":
+            # log_std/learnable_log_std retain their legacy meaning; this
+            # explicitly selected mode uses init_std/learnable_std instead.
+            if learnable_std:
+                self.std = nn.Parameter(torch.full((action_dim,), float(init_std)))
+            else:
+                self.register_buffer("std", torch.full((action_dim,), float(init_std)))
         else:
             if learnable_log_std:
                 self.log_std = nn.Parameter(torch.ones(action_dim)*log_std)
@@ -389,11 +416,14 @@ class GaussianHead(nn.Module):
             log_std = self.log_std_layer(x)
             log_std = torch.tanh(log_std)
             log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
+            std = torch.exp(log_std)
+        elif self.std_parameterization == "std":
+            std = torch.clamp(self.std, min=self.std_min, max=self.std_max).expand_as(mu)
+            log_std = torch.log(std)
         else:
             log_std = self.log_std.expand_as(mu)
             log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-
-        std = torch.exp(log_std)
+            std = torch.exp(log_std)
 
         base_pi = Normal(mu, std)
         if self.max_action is not None:
@@ -443,15 +473,15 @@ class GaussianHead(nn.Module):
         if max_action is not None:
             mu_squashed = max_action * torch.tanh(mu)
             if sampled_action:
-                entropy = -log_prob / mu.shape[-1]
+                entropy = -log_prob
             else:
                 entropy_pre_tanh = base_pi.rsample()
                 entropy_squashed = torch.tanh(entropy_pre_tanh)
                 entropy_log_det = torch.log(max_action * (1 - entropy_squashed.pow(2)) + eps)
-                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).mean(dim=-1)
+                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).sum(dim=-1)
         else:
             mu_squashed = mu
-            entropy = base_pi.entropy().mean(dim=-1)
+            entropy = base_pi.entropy().sum(dim=-1)
 
         step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 

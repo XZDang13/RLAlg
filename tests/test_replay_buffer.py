@@ -31,6 +31,49 @@ def test_compute_gae_accepts_bool_terminated():
     assert torch.isfinite(advantages).all()
 
 
+def test_compute_gae_bootstraps_timeouts_and_stops_recursion():
+    rewards = torch.tensor([[1.0, 1.0]])
+    values = torch.tensor([[10.0, 10.0]])
+    terminated = torch.tensor([[False, False]])
+    truncated = torch.tensor([[True, True]])
+    last_values = torch.tensor([100.0, 100.0])
+
+    bootstrapped_returns, _ = compute_gae(
+        rewards,
+        values,
+        terminated,
+        last_values,
+        gamma=0.9,
+        lambda_=0.95,
+        truncated=truncated,
+        bootstrap_timeouts=True,
+    )
+    unbootstrapped_returns, _ = compute_gae(
+        rewards,
+        values,
+        terminated,
+        last_values,
+        gamma=0.9,
+        lambda_=0.95,
+        truncated=truncated,
+        bootstrap_timeouts=False,
+    )
+
+    torch.testing.assert_close(bootstrapped_returns, torch.tensor([[10.0, 10.0]]))
+    torch.testing.assert_close(unbootstrapped_returns, torch.tensor([[1.0, 1.0]]))
+
+
+def test_compute_gae_rejects_timeout_shape_mismatch():
+    with pytest.raises(ValueError, match="truncated must have shape"):
+        compute_gae(
+            torch.ones(2, 1),
+            torch.ones(2, 1),
+            torch.zeros(2, 1, dtype=torch.bool),
+            torch.zeros(1),
+            truncated=torch.zeros(1, 1, dtype=torch.bool),
+        )
+
+
 def test_sample_batch_raises_on_empty_buffer():
     buffer = ReplayBuffer(num_envs=2, steps=4)
     buffer.create_storage_space("obs", (3,))
