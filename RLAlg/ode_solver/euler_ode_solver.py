@@ -1,3 +1,4 @@
+import inspect
 import torch
 import torch.nn as nn
 
@@ -32,24 +33,28 @@ class EulerODESolver:
         current_action: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
-        call_errors: list[TypeError] = []
+        signature = inspect.signature(model.forward)
         call_attempts = (
-            lambda: model(obs, current_action, time=time),
-            lambda: model(obs, current_action, time),
-            lambda: model(obs, current_action),
-            lambda: model(obs),
+            ((obs, current_action), {"time": time}),
+            ((obs, current_action), {"t": time}),
+            ((obs, current_action, time), {}),
+            ((obs, current_action), {}),
+            ((obs,), {}),
         )
-
-        for call_fn in call_attempts:
+        for args, kwargs in call_attempts:
             try:
-                return EulerODESolver._extract_prediction(call_fn())
-            except TypeError as error:
-                call_errors.append(error)
+                signature.bind(*args, **kwargs)
+            except TypeError:
+                continue
+            # A TypeError from inside forward is a model error. Do not run the
+            # model again under a different signature or hide its traceback.
+            return EulerODESolver._extract_prediction(model(*args, **kwargs))
 
         raise TypeError(
             "Could not call model with supported signatures: "
-            "(obs, action, time=...), (obs, action, time), (obs, action), or (obs)."
-        ) from call_errors[-1]
+            "(obs, action, time=...), (obs, action, t=...), "
+            "(obs, action, time), (obs, action), or (obs)."
+        )
 
     @staticmethod
     def denoise(
@@ -74,16 +79,17 @@ class EulerODESolver:
             raise ValueError("obs must be provided.")
         if not torch.is_tensor(init_noise):
             raise TypeError(f"init_noise must be a torch.Tensor, got {type(init_noise)}.")
+        if init_noise.ndim < 1 or init_noise.numel() == 0 or not init_noise.is_floating_point():
+            raise ValueError("init_noise must be a non-empty floating-point action tensor.")
 
         denoised_x = init_noise
         denoised_path = [denoised_x]
         dt = 1.0 / float(flow_steps)
 
-        batch_size = denoised_x.shape[0] if denoised_x.ndim > 0 else 1
         for step_idx in range(flow_steps):
             t_value = 1.0 - step_idx * dt
             t_tensor = torch.full(
-                (batch_size, 1),
+                (*denoised_x.shape[:-1], 1),
                 t_value,
                 dtype=denoised_x.dtype,
                 device=denoised_x.device,
@@ -103,4 +109,4 @@ class EulerODESolver:
         if not deterministic:
             x = x + torch.randn_like(x) * dt
 
-        return x, torch.stack(denoised_path, dim=1)
+        return x, torch.stack(denoised_path, dim=-2)

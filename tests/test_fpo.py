@@ -216,7 +216,7 @@ def test_compute_policy_loss_matches_unclipped_ratio_objective():
     assert torch.allclose(output["cmf_loss"], torch.tensor(0.0))
 
 
-def test_compute_policy_loss_uses_per_sample_ratios_by_default():
+def test_compute_policy_loss_supports_explicit_per_sample_ratio_ablation():
     policy = ZeroFlowActor()
     obs = torch.zeros(2, 4)
     actions = torch.zeros(2, 2)
@@ -237,6 +237,7 @@ def test_compute_policy_loss_uses_per_sample_ratios_by_default():
             init_cmf_loss=init_cmf_loss,
             advantages=advantages,
             clip_ratio=10.0,
+            average_losses_before_exp=False,
         )
     finally:
         FPO.supervise_target = prev_target
