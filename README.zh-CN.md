@@ -33,18 +33,30 @@ Gymnasium、MuJoCo 等环境依赖由训练项目管理，核心库无需安装�
 | `DSACT` | [dsact.py](RLAlg/alg/dsact.py) | 使用运行标准差统计的 Q 分布双 critic |
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | 流动作采样、CMF 损失、裁剪流策略优化 |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | 离线 expectile 价值回归和优势加权策略拟合 |
+| `SHAC` | [shac.py](RLAlg/alg/shac.py) | 通过可微仿真器的短视界解析策略梯度、TD(λ) 价值目标 |
 
-DDPG、DDPGDoubleQ、SAC 还支持 actor/critic 使用不同观测的非对称接口，
-以及多个 critic 加权的策略损失。SAC、DSAC、DSACT 提供
-`compute_alpha_loss`，优化用的张量放在 `"alpha_loss"` 键中。
-策略、价值、critic 的损失字典使用 `"loss"` 键，不同方法还返回相应指标。
+所有损失函数采用同一套调用约定：
 
-目标网络的创建和更新调度由调用方负责。相应的
-`update_target_param(model, model_target, tau)` 方法按
-`(1 - tau) * target + tau * source` 更新目标参数。
+- 模型按位置传入；模型之后的张量和超参数都只能按关键字传，例如
+  `SAC.compute_critic_loss(actor, critic, critic_target, observations=..., actions=...,
+  rewards=..., next_observations=..., terminated=..., alpha=0.2, gamma=0.99)`。
+  `terminated` 表示真正的终止，超时仍应 bootstrap。
+- 返回值都是字典，优化用的张量放在 `"loss"` 中，`compute_alpha_loss` 也一样。
+  其余条目是 detach 后的指标，例如双 critic 的 `"q1"`、`"q2"`、`"q_target"`。
+- 价值和 Q 的回归统一用 `0.5 * mean((prediction - target) ** 2)`，双 critic
+  求和。预测、目标、奖励和终止掩码的形状必须一致；`[B, 1]` 的奖励配 `[B]`
+  的价值会报错。
+- off-policy 损失用 `critic_observations` / `next_critic_observations` 支持
+  非对称 actor-critic，默认 critic 看到的观测与 actor 相同。策略损失可以传入
+  critic 列表并配 `critic_weights`。PPO 可以传入优势列表并配 `advantage_weights`，
+  循环网络用 `episode_starts`、`initial_state`、`valid_mask`。
 
-DSACT 将运行统计保存在类属性 `q1_mean_std` 和 `q2_mean_std` 中。
-开始独立训练前，将两者设为 `None`。
+目标网络的创建和更新调度由调用方负责。
+`update_target_param(model, model_target, tau)` 按
+`(1 - tau) * target + tau * source` 更新目标参数，并复制归一化统计量等 buffer。
+
+DSACT 维护 critic 标准差的滑动平均。第一次更新 critic 时传 `q_mean_std=None`，
+之后传入上一次返回的 `result["q_mean_std"]`。
 
 ## 模型接口
 
@@ -57,7 +69,7 @@ DSACT 将运行统计保存在类属性 `q1_mean_std` 和 `q2_mean_std` 中。
 | --- | --- | --- |
 | `DiscretePolicyStep` | `pi`、`action`、`log_prob`、`entropy` | 离散 PPO 或 IQL 策略 |
 | `StochasticContinuousPolicyStep` | `pi`、`action`、`log_prob`、`mean`、`log_std`、`entropy` | 连续 PPO、SAC、DSAC、DSACT 或 IQL 策略 |
-| `DeterministicContinuousPolicyStep` | `pi`、`mean` | DDPG 或 DDPGDoubleQ 策略 |
+| `DeterministicContinuousPolicyStep` | `mean`、`pre_tanh_mean`、`max_action` | DDPG 或 DDPGDoubleQ 策略 |
 | `ValueStep` | `value` | 状态价值或标量 Q 预测 |
 | `DistributionStep` | `pi`、`mean`、`std`、`sample` | Q 分布预测 |
 | `FPOStep` | `action`、`action_path`、`eps`、`time_step`、`init_cmf_loss` | 流采样结果和可选的缓存 CMF 目标 |
@@ -110,10 +122,10 @@ advantages = torch.randn(32)
 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 returns = torch.randn(32)
 policy_result = PPO.compute_policy_loss(
-    policy, old_step.log_prob, observations, old_step.action,
-    advantages, clip_ratio=0.2, entropy_coef=0.01,
+    policy, log_probs_hat=old_step.log_prob, observations=observations,
+    actions=old_step.action, advantages=advantages, clip_ratio=0.2, entropy_coef=0.01,
 )
-value_result = PPO.compute_value_loss(value_model, observations, returns)
+value_result = PPO.compute_value_loss(value_model, observations=observations, returns=returns)
 loss = policy_result["loss"] + 0.5 * value_result["loss"]
 optimizer.zero_grad(set_to_none=True)
 loss.backward()
@@ -122,10 +134,22 @@ print({key: metric.detach().item() for key, metric in policy_result.items()})
 ```
 
 `GaussianHead` 提供连续策略，可使用带缩放的 tanh 动作范围。
-默认 `std_parameterization="log_std"` 学习对数标准差；
-`std_parameterization="std"` 配合 `init_std` 可直接学习标准差。
+各种模式的标准差都用标准差本身的单位配置：`init_std` 是初始值，
+`[std_min, std_max]` 是允许范围（默认 `1`、`e^-20`、`e^2`）。
+默认 `std_parameterization="log_std"` 学习对数标准差，`"std"` 直接学习标准差，
+`learnable_std=False` 固定标准差，`state_dependent_std=True` 由特征预测标准差。
+带 tanh 范围时，`entropy` 是单样本估计 `-log_prob(a')`，`a'` 从当前策略采样，
+因此不会使用传入的旧策略动作。
+`DeterministicHead` 只输出确定性动作；DDPGDoubleQ 的探索噪声和目标噪声由
+`DDPGDoubleQ.perturb_action(step, std)` 在 tanh 之前加入。
 其他输出头和网络构建接口见 [layers.py](RLAlg/nn/layers.py)。
 `NormPosition.NONE`、`PRE`、`POST` 控制归一化的位置。
+
+`GaussianHead` 和 `CategoricalHead` 支持 `validate_args` 参数，默认 `None`
+保留 PyTorch 分布的默认校验行为。对已验证的 GPU 训练输入，可显式设置
+`validate_args=False`，避免分布参数/样本校验中的 CPU 标量读取和 GPU 同步。
+该选项不改变采样、log_prob 或梯度公式；调用方仍应检查动作范围和训练数值，
+例如使用异步有限值断言。它不会修改 PyTorch 的全局校验设置。
 
 ## 经验回放、GAE 与 episode 边界
 
@@ -135,7 +159,7 @@ print({key: metric.detach().item() for key, metric in policy_result.items()})
 
 ```python
 import torch
-from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae
+from RLAlg.buffer import ReplayBuffer, compute_gae
 
 buffer = ReplayBuffer(num_envs=4, steps=8, device=torch.device("cpu"))
 buffer.create_storage_space("observations", (3,))
@@ -152,9 +176,8 @@ values = torch.zeros(8, 4)
 terminated = torch.zeros(8, 4, dtype=torch.bool)
 truncated = torch.zeros_like(terminated)
 returns, advantages = compute_gae(
-    rewards, values, terminated, last_values=torch.zeros(4),
+    rewards=rewards, values=values, terminated=terminated, last_values=torch.zeros(4),
     gamma=0.99, lambda_=0.95, truncated=truncated,
-    bootstrap_timeouts=False,
 )
 assert returns.shape == advantages.shape == (8, 4)
 ```
@@ -163,19 +186,114 @@ assert returns.shape == advantages.shape == (8, 4)
 transition 小批次。`reset` 清空 rollout，`save` 和 `load` 保存、读取缓冲区。
 `sample_sequence_batches` 返回时间优先的序列块、`valid_mask` 和可选的初始状态字段。
 循环策略的 on-policy 更新应先采集一段新的 rollout，再采样序列。
+存储是循环的：写满后新数据覆盖最旧的数据，此时 `data[:current_size]`
+不再按时间排序。`time_order()` 按从旧到新返回存储位置，
+`sample_sequence_batches` 就是按它切分序列的。
 
-`compute_gae` 返回回报和归一化后的优势，同时将 `terminated`、`truncated`
-视为 episode 边界。优势归一化需要至少两条 transition。
+回报和优势估计函数在 [advantages.py](RLAlg/buffer/advantages.py) 中，
+参数只能按关键字传。`compute_gae` 和 `compute_advantage_mc` 返回回报和优势，
+同时将 `terminated`、`truncated` 视为 episode 边界；`compute_returns`
+对折扣回报采用相同规则。优势默认会标准化，`normalize=False` 可关闭
+（例如按 minibatch 归一化或组合多个 critic 时）；标准化需要至少两条 transition。
 若希望超时从真实末状态 bootstrap，请先自行给相应奖励加上
 `gamma * V(final_obs)`，并保持 `bootstrap_timeouts=False`。
 可选的 `True` 模式采用当前状态价值约定，在超时处加上
 `gamma * values[t]`；不要同时应用两种修正。
 Off-policy 方法若希望超时从真实下一观测 bootstrap，则 `done` 应仅表示真正终止。
 
-对于目标条件任务，[HindsightExperienceReplay](RLAlg/buffer/her.py)
-负责重标记目标，并可重新计算奖励和终止标记。
-`ReplayBuffer.sample_batch(..., her_strategies=...)` 为
-`future`、`final`、`episode`、`random` 策略提供候选目标。
+对于目标条件任务，[HERReplayBuffer](RLAlg/buffer/her.py) 是一个
+`ReplayBuffer`：写入 transition 时记录 episode 边界，采样时重标记目标：
+
+```python
+from RLAlg.buffer import HERReplayBuffer, env_reward_fn
+
+buffer = HERReplayBuffer(
+    num_envs, steps, device,
+    reward_fn=env_reward_fn(envs),  # 或任意 f(achieved, desired) -> reward
+    strategy="future", replay_k=4,
+)
+for key, shape in (("observations", obs_shape), ("desired_goal", goal_shape),
+                   ("next_achieved_goal", goal_shape), ("rewards", ())):
+    buffer.create_storage_space(key, shape)
+buffer.create_storage_space("terminated", ())
+buffer.create_storage_space("episode_end", (), torch.bool)
+
+buffer.add_records({..., "terminated": terminated, "episode_end": terminated | truncated})
+batch = buffer.sample_batch(["observations", "desired_goal", "rewards", "terminated"], 256)
+```
+
+采样到的 transition 中有 `1 - 1 / (1 + replay_k)` 的比例会被换成同一 episode
+里某一步 `t'` 之后达到的目标，并用 `reward_fn(next_achieved_goal_t, goal)`
+重算奖励。`future` 在 `t` 到 episode 结束之间均匀取 `t'`（`t' = t` 即立即成功），
+`final` 取最后一步，`episode` 在该 episode 仍留在 buffer 中的步里均匀取。
+尚未结束的 episode 暂时以它最新写入的一步作为结束。`batch["her_mask"]`
+标出被重标记的行。`episode_end` 必须包含超时；真正的终止另存一个键，
+用作 Bellman 掩码。对成功即结束的任务，可传入 `done_fn` 和 `done_key`
+同时重算终止标记。`env_reward_fn` 包装 Gymnasium-Robotics 的 `compute_reward`；
+对向量环境，它使用第一个子环境，一次计算整批奖励。
+
+## Short-Horizon Actor-Critic
+
+SHAC 需要可微环境，例如 DFlex、Warp、MJX、Brax、Genesis。
+actor 梯度通过对仿真器反向传播得到，因此 `rewards` 和 `next_values`
+必须保留计算图。所有 rollout 张量都是时间优先的 `[H, N]`。
+`next_values[t]` 是真实下一观测上的 `V(s_{t+1})`，即自动重置前的最终观测。
+参考实现用目标 critic 计算它。
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.shac import SHAC
+from RLAlg.nn.steps import ValueStep
+
+class Critic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.net(obs).squeeze(-1))
+
+policy, critic = nn.Linear(3, 3), Critic()
+H, N, gamma = 8, 4, 0.99
+state = torch.randn(N, 3)  # 通常来自 env.reset()；必须保留在计算图中
+observations, rewards, next_values = [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+truncated = torch.zeros_like(terminated)
+for t in range(H):
+    observations.append(state.detach())
+    state = state + 0.1 * torch.tanh(policy(state))  # 可微的 env.step
+    rewards.append(-(state ** 2).sum(-1))
+    next_values.append(critic(state).value)  # done 时用重置前的最终观测
+rewards, next_values = torch.stack(rewards), torch.stack(next_values)
+
+policy_result = SHAC.compute_policy_loss(
+    rewards=rewards, next_values=next_values, terminated=terminated,
+    gamma=gamma, truncated=truncated,
+)
+policy_result["loss"].backward()  # 之后只更新策略优化器
+
+targets = SHAC.compute_td_lambda_targets(
+    rewards=rewards, next_values=next_values, terminated=terminated,
+    gamma=gamma, lambda_=0.95, truncated=truncated,
+)
+value_result = SHAC.compute_value_loss(
+    critic, observations=torch.stack(observations), targets=targets,
+)
+assert targets.shape == (H, N)
+```
+
+策略损失是负回报 `sum_t gamma^t r_t + gamma^h V(s_h)`，再除以 `H * N`。
+在 rollout 中途结束的 episode 单独计算一段回报，之后折扣重新开始。
+终止步不做 bootstrap，终止观测上的非有限价值会被屏蔽。
+截断步和 rollout 的最后一步从 `next_values` bootstrap。
+`compute_td_lambda_targets` 会 detach 输入，并使用相同的边界；
+`lambda_=0` 即单步目标。`compute_value_loss` 使用库里统一的 `0.5` 倍均方误差；
+参考实现没有 `0.5`，在 Adam 下这只影响梯度裁剪的效果。
+
+策略的反向传播也会给 critic 写入梯度。更新 critic 前先清零其梯度，
+或者用目标 critic 计算 `next_values`，并用 `SHAC.update_target_param` 更新它。
+若要在 rollout 之间截断梯度，请在下一次 rollout 开始前 detach 仿真器状态。
 
 ## Flow Policy Optimization
 
@@ -210,15 +328,15 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 observations = torch.randn(32, 4)
 target = SuperviseTarget.Noise
 step = FPO.sample_actions_with_cmf_info(
-    policy, observations, torch.randn(32, 2), flow_steps=8,
+    policy, observations=observations, init_noise=torch.randn(32, 2), flow_steps=8,
     n_samples_per_action=10, supervise_target=target,
     time_step_sampler=TimeStepSamplerStrategy.Continuous,
 )
 advantages = torch.linspace(-1, 1, 32)  # Replace with rollout advantages.
 result = FPO.compute_policy_loss(
-    policy, observations, step.action, step.eps, step.time_step,
-    step.init_cmf_loss, advantages, clip_ratio=0.05,
-    supervise_target=target,
+    policy, observations=observations, actions=step.action, eps=step.eps,
+    t=step.time_step, init_cmf_loss=step.init_cmf_loss, advantages=advantages,
+    clip_ratio=0.05, supervise_target=target,
 )
 optimizer.zero_grad(set_to_none=True)
 result["loss"].backward()
@@ -273,7 +391,7 @@ python -m pytest -q
 ```
 
 测试覆盖算法损失、形状检查、终止掩码、循环网络、replay/HER、归一化、日志，
-以及 FPO 的采样和梯度。
+FPO 的采样和梯度，以及 SHAC 在可微玩具 rollout 上的梯度。
 
 ## 许可证
 

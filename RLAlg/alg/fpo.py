@@ -8,6 +8,7 @@ import torch.nn as nn
 from RLAlg.ode_solver.euler_ode_solver import EulerODESolver
 
 from ..nn.steps import FPOStep, ValueStep
+from .ppo import PPO
 
 NNMODEL = nn.Module
 
@@ -154,22 +155,23 @@ class FPO:
     @staticmethod
     def compute_cmf_loss(
         policy: NNMODEL,
-        obs: torch.Tensor | dict[str, torch.Tensor],
-        action: torch.Tensor,
+        *,
+        observations: torch.Tensor | dict[str, torch.Tensor],
+        actions: torch.Tensor,
         eps: torch.Tensor,
         t: torch.Tensor,
-        *,
         supervise_target: SuperviseTarget | None = None,
     ) -> torch.Tensor:
-        if action.ndim < 1 or action.numel() == 0 or not action.is_floating_point():
+        """Per-sample CMF losses, shape ``[*batch, n_samples]``."""
+        if actions.ndim < 1 or actions.numel() == 0 or not actions.is_floating_point():
             raise ValueError(
-                f"action must have at least 1 dim with trailing action_dim, got {tuple(action.shape)}."
+                f"actions must have at least 1 dim with trailing action_dim, got {tuple(actions.shape)}."
             )
 
-        action_dim = action.shape[-1]
-        batch_dims = action.shape[:-1]
-        FPO._validate_observation_batch_dims(obs, batch_dims)
-        if eps.ndim != action.ndim + 1 or eps.shape[-2] <= 0:
+        action_dim = actions.shape[-1]
+        batch_dims = actions.shape[:-1]
+        FPO._validate_observation_batch_dims(observations, batch_dims)
+        if eps.ndim != actions.ndim + 1 or eps.shape[-2] <= 0:
             raise ValueError("eps must include a non-empty Monte Carlo sample dimension.")
         sample_shape = eps.shape[:-1]
         flow_shape = (*sample_shape, action_dim)
@@ -177,21 +179,21 @@ class FPO:
 
         if sample_shape[:-1] != batch_dims:
             raise ValueError(
-                "eps batch dims must match action batch dims, "
+                "eps batch dims must match actions batch dims, "
                 f"got {tuple(sample_shape[:-1])} and {tuple(batch_dims)}."
             )
         if eps.shape != flow_shape:
             raise ValueError(f"eps must have shape {flow_shape}, got {tuple(eps.shape)}.")
-        eps = eps.to(dtype=action.dtype, device=action.device)
+        eps = eps.to(dtype=actions.dtype, device=actions.device)
 
         if t.shape != time_shape:
             raise ValueError(f"t must have shape {time_shape}, got {tuple(t.shape)}.")
-        t = t.to(dtype=action.dtype, device=action.device)
+        t = t.to(dtype=actions.dtype, device=actions.device)
         if not torch.isfinite(t).all() or torch.any((t < 0) | (t > 1)):
             raise ValueError("Flow timesteps must be finite and in [0, 1].")
 
-        action_samples = action.unsqueeze(-2).expand(flow_shape)
-        obs_samples = FPO._expand_observations(obs, batch_dims, sample_shape[-1])
+        action_samples = actions.unsqueeze(-2).expand(flow_shape)
+        obs_samples = FPO._expand_observations(observations, batch_dims, sample_shape[-1])
         x_t = t * eps + (1.0 - t) * action_samples
 
         network_pred = FPO._call_policy(policy, obs_samples, x_t, t)
@@ -220,7 +222,8 @@ class FPO:
     @torch.no_grad()
     def sample_actions(
         policy: NNMODEL,
-        obs: torch.Tensor | dict[str, torch.Tensor],
+        *,
+        observations: torch.Tensor | dict[str, torch.Tensor],
         init_noise: torch.Tensor,
         flow_steps: int,
         deterministic: bool = True,
@@ -231,7 +234,7 @@ class FPO:
         ``deterministic=False`` explicitly enables the solver's extra jitter.
         """
         action, action_path = EulerODESolver.denoise(policy, flow_steps,
-                                                     obs, init_noise, deterministic)
+                                                     observations, init_noise, deterministic)
 
         return FPOStep(action=action, action_path=action_path)
 
@@ -239,12 +242,12 @@ class FPO:
     @torch.no_grad()
     def sample_actions_with_cmf_info(
         policy: NNMODEL,
-        obs: torch.Tensor | dict[str, torch.Tensor],
+        *,
+        observations: torch.Tensor | dict[str, torch.Tensor],
         init_noise: torch.Tensor,
         flow_steps: int,
         deterministic: bool = True,
         n_samples_per_action: int = 10,
-        *,
         supervise_target: SuperviseTarget | None = None,
         time_step_sampler: TimeStepSamplerStrategy | None = None,
     ) -> FPOStep:
@@ -253,7 +256,7 @@ class FPO:
         action, action_path = EulerODESolver.denoise(
             policy,
             flow_steps,
-            obs,
+            observations,
             init_noise,
             deterministic,
         )
@@ -271,9 +274,9 @@ class FPO:
             flow_steps=flow_steps,
         )
         cmf_loss = FPO.compute_cmf_loss(
-            policy=policy,
-            obs=obs,
-            action=action,
+            policy,
+            observations=observations,
+            actions=action,
             eps=eps,
             t=t,
             supervise_target=supervise_target,
@@ -290,6 +293,7 @@ class FPO:
     @staticmethod
     def compute_policy_loss(
         policy: NNMODEL,
+        *,
         observations: torch.Tensor | dict[str, torch.Tensor],
         actions: torch.Tensor,
         eps: torch.Tensor,
@@ -299,7 +303,6 @@ class FPO:
         clip_ratio: float,
         average_losses_before_exp: bool = True,
         ratio_clip_range: tuple[float, float] | None = (-3.0, 3.0),
-        *,
         supervise_target: SuperviseTarget | None = None,
     ) -> dict[str, torch.Tensor]:
         """Use one ratio per action: exp(mean_i(old_loss_i - new_loss_i)).
@@ -317,7 +320,7 @@ class FPO:
 
         # Rollout targets remain fixed throughout all optimization epochs.
         current_cmf_loss = FPO.compute_cmf_loss(
-            policy, observations, actions.detach(), eps.detach(), t.detach(),
+            policy, observations=observations, actions=actions.detach(), eps=eps.detach(), t=t.detach(),
             supervise_target=supervise_target,
         )
         if current_cmf_loss.shape != init_cmf_loss.shape:
@@ -372,47 +375,24 @@ class FPO:
         }
 
     @staticmethod
-    def _validate_same_shape(name_a: str, tensor_a: torch.Tensor, name_b: str, tensor_b: torch.Tensor) -> None:
-        if tensor_a.shape != tensor_b.shape:
-            raise ValueError(
-                f"{name_a} and {name_b} must have the same shape, got {tuple(tensor_a.shape)} and {tuple(tensor_b.shape)}."
-            )
-
-    @staticmethod
     def compute_value_loss(
         value_model: NNMODEL,
-        observations: torch.Tensor|dict[str, torch.Tensor],
-        returns: torch.Tensor
+        *,
+        observations: torch.Tensor | dict[str, torch.Tensor],
+        returns: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        step: ValueStep = value_model(observations)
-        values = step.value
-        FPO._validate_same_shape("values", values, "returns", returns)
-        loss = 0.5 * ((returns - values) ** 2).mean()
-        return {
-            "loss": loss
-        }
+        # Same 0.5 * MSE regression and diagnostics as PPO.
+        return PPO.compute_value_loss(value_model, observations=observations, returns=returns)
 
     @staticmethod
     def compute_clipped_value_loss(
         value_model: NNMODEL,
-        observations: torch.Tensor|dict[str, torch.Tensor],
+        *,
+        observations: torch.Tensor | dict[str, torch.Tensor],
         values_hat: torch.Tensor,
         returns: torch.Tensor,
-        clip_ratio: float
+        clip_ratio: float,
     ) -> dict[str, torch.Tensor]:
-        step: ValueStep = value_model(observations)
-        values = step.value
-        FPO._validate_same_shape("values", values, "values_hat", values_hat)
-        FPO._validate_same_shape("values", values, "returns", returns)
-
-        loss_unclipped = 0.5 * (returns - values) ** 2
-
-        values_clipped = values_hat + torch.clamp(values - values_hat, -clip_ratio, clip_ratio)
-        loss_clipped = 0.5 * (returns - values_clipped) ** 2
-
-        loss = torch.max(loss_unclipped, loss_clipped)
-        loss = loss.mean()
-
-        return {
-            "loss": loss
-        }
+        return PPO.compute_clipped_value_loss(
+            value_model, observations=observations, values_hat=values_hat, returns=returns, clip_ratio=clip_ratio,
+        )

@@ -86,8 +86,8 @@ def test_compute_cmf_loss_noise_mode_uses_provided_targets():
         FPO.supervise_target = SuperviseTarget.Noise
         output = FPO.compute_cmf_loss(
             policy=actor,
-            obs=obs,
-            action=action,
+            observations=obs,
+            actions=action,
             eps=eps,
             t=t,
         )
@@ -110,8 +110,8 @@ def test_compute_cmf_loss_supports_dict_observations():
 
     output = FPO.compute_cmf_loss(
         policy=actor,
-        obs=obs,
-        action=action,
+        observations=obs,
+        actions=action,
         eps=eps,
         t=t,
     )
@@ -129,8 +129,8 @@ def test_compute_cmf_loss_supports_non_flat_tensor_observations():
 
     output = FPO.compute_cmf_loss(
         policy=actor,
-        obs=obs,
-        action=action,
+        observations=obs,
+        actions=action,
         eps=eps,
         t=t,
     )
@@ -149,7 +149,7 @@ def test_sample_actions_with_cmf_info_samples_discrete_t_when_missing():
         FPO.time_step_sampler = TimeStepSamplerStrategy.Discrete
         output = FPO.sample_actions_with_cmf_info(
             policy=actor,
-            obs=obs,
+            observations=obs,
             init_noise=init_noise,
             flow_steps=4,
             n_samples_per_action=5,
@@ -174,8 +174,8 @@ def test_compute_cmf_loss_raises_on_actor_shape_mismatch():
     try:
         FPO.compute_cmf_loss(
             policy=actor,
-            obs=obs,
-            action=action,
+            observations=obs,
+            actions=action,
             eps=eps,
             t=t,
         )

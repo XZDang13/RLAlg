@@ -1,77 +1,7 @@
 import torch
 import pytest
 
-from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae, compute_returns
-
-
-def test_compute_returns_accepts_bool_terminated():
-    rewards = torch.tensor([[1.0], [2.0]])
-    terminated = torch.tensor([[True], [False]])
-    last_values = torch.tensor([0.0])
-
-    returns = compute_returns(rewards, terminated, last_values, gamma=0.99)
-
-    assert returns.shape == rewards.shape
-    assert torch.isfinite(returns).all()
-
-
-def test_compute_gae_accepts_bool_terminated():
-    rewards = torch.tensor([[1.0], [2.0]])
-    values = torch.tensor([[0.5], [0.4]])
-    terminated = torch.tensor([[False], [True]])
-    last_values = torch.tensor([0.0])
-
-    returns, advantages = compute_gae(
-        rewards, values, terminated, last_values, gamma=0.99, lambda_=0.95
-    )
-
-    assert returns.shape == rewards.shape
-    assert advantages.shape == rewards.shape
-    assert torch.isfinite(returns).all()
-    assert torch.isfinite(advantages).all()
-
-
-def test_compute_gae_bootstraps_timeouts_and_stops_recursion():
-    rewards = torch.tensor([[1.0, 1.0]])
-    values = torch.tensor([[10.0, 10.0]])
-    terminated = torch.tensor([[False, False]])
-    truncated = torch.tensor([[True, True]])
-    last_values = torch.tensor([100.0, 100.0])
-
-    bootstrapped_returns, _ = compute_gae(
-        rewards,
-        values,
-        terminated,
-        last_values,
-        gamma=0.9,
-        lambda_=0.95,
-        truncated=truncated,
-        bootstrap_timeouts=True,
-    )
-    unbootstrapped_returns, _ = compute_gae(
-        rewards,
-        values,
-        terminated,
-        last_values,
-        gamma=0.9,
-        lambda_=0.95,
-        truncated=truncated,
-        bootstrap_timeouts=False,
-    )
-
-    torch.testing.assert_close(bootstrapped_returns, torch.tensor([[10.0, 10.0]]))
-    torch.testing.assert_close(unbootstrapped_returns, torch.tensor([[1.0, 1.0]]))
-
-
-def test_compute_gae_rejects_timeout_shape_mismatch():
-    with pytest.raises(ValueError, match="truncated must have shape"):
-        compute_gae(
-            torch.ones(2, 1),
-            torch.ones(2, 1),
-            torch.zeros(2, 1, dtype=torch.bool),
-            torch.zeros(1),
-            truncated=torch.zeros(1, 1, dtype=torch.bool),
-        )
+from RLAlg.buffer.replay_buffer import ReplayBuffer
 
 
 def test_sample_batch_raises_on_empty_buffer():
@@ -82,123 +12,63 @@ def test_sample_batch_raises_on_empty_buffer():
         buffer.sample_batch(["obs"], batch_size=1)
 
 
-def test_sample_batch_returns_future_samples_within_same_episode():
-    buffer = ReplayBuffer(num_envs=1, steps=6)
-    buffer.create_storage_space("obs", ())
-    buffer.create_storage_space("done", (), dtype=torch.bool)
-
-    done = [False, False, True, False, False, True]
-    for t in range(6):
-        buffer.add_records(
-            {
-                "obs": torch.tensor([float(t)]),
-                "done": torch.tensor([done[t]]),
-            }
-        )
-
-    torch.manual_seed(0)
-    batch = buffer.sample_batch(["obs"], batch_size=128, future_steps=2)
-
-    assert "obs_future" in batch
-    current = batch["obs"].to(dtype=torch.long)
-    future = batch["obs_future"].to(dtype=torch.long)
-
-    for cur, fut in zip(current.tolist(), future.tolist()):
-        expected = min(cur + 2, len(done) - 1)
-        for step in range(cur, expected):
-            if done[step]:
-                expected = step
-                break
-        assert fut == expected
-
-
-def test_sample_batch_future_steps_requires_episode_end_key():
-    buffer = ReplayBuffer(num_envs=1, steps=4)
-    buffer.create_storage_space("obs", ())
-    buffer.add_records({"obs": torch.tensor([1.0])})
-
-    with pytest.raises(ValueError, match="episode end key"):
-        buffer.sample_batch(["obs"], batch_size=1, future_steps=1)
-
-
-def test_sample_batch_future_steps_uses_terminated_fallback():
-    buffer = ReplayBuffer(num_envs=1, steps=4)
-    buffer.create_storage_space("obs", ())
-    buffer.create_storage_space("terminated", (), dtype=torch.bool)
-
-    terminated = [False, True, False, True]
-    for t in range(4):
-        buffer.add_records(
-            {
-                "obs": torch.tensor([float(t)]),
-                "terminated": torch.tensor([terminated[t]]),
-            }
-        )
-
-    batch = buffer.sample_batch(["obs"], batch_size=32, future_steps=2)
-    assert "obs_future" in batch
-
-
-def test_sample_batch_her_strategies_final_episode_and_random():
-    buffer = ReplayBuffer(num_envs=1, steps=6)
-    buffer.create_storage_space("obs", ())
-    buffer.create_storage_space("done", (), dtype=torch.bool)
-
-    done = [False, False, True, False, False, True]
-    for t in range(6):
-        buffer.add_records(
-            {
-                "obs": torch.tensor([float(t)]),
-                "done": torch.tensor([done[t]]),
-            }
-        )
-
-    torch.manual_seed(0)
-    batch = buffer.sample_batch(
-        ["obs"],
-        batch_size=256,
-        her_strategies=["final", "episode", "random"],
-    )
-
-    assert "obs_final" in batch
-    assert "obs_episode" in batch
-    assert "obs_random" in batch
-
-    current = batch["obs"].to(dtype=torch.long)
-    final = batch["obs_final"].to(dtype=torch.long)
-    episode = batch["obs_episode"].to(dtype=torch.long)
-    random = batch["obs_random"].to(dtype=torch.long)
-
-    for cur, fin, epi in zip(current.tolist(), final.tolist(), episode.tolist()):
-        if cur <= 2:
-            assert fin == 2
-            assert 0 <= epi <= 2
-        else:
-            assert fin == 5
-            assert 3 <= epi <= 5
-
-    assert ((random >= 0) & (random <= 5)).all()
-
-
-def test_sample_batch_future_strategy_requires_positive_future_steps():
-    buffer = ReplayBuffer(num_envs=1, steps=3)
-    buffer.create_storage_space("obs", ())
-    buffer.create_storage_space("done", (), dtype=torch.bool)
+def test_sample_batch_gathers_matching_rows_across_keys():
+    buffer = ReplayBuffer(num_envs=2, steps=4)
+    buffer.create_storage_space("x", ())
+    buffer.create_storage_space("y", (2,))
     for t in range(3):
-        buffer.add_records({"obs": torch.tensor([float(t)]), "done": torch.tensor([False])})
+        x = torch.tensor([10.0 * t, 10.0 * t + 1])
+        buffer.add_records({"x": x, "y": torch.stack([x, -x], dim=-1)})
 
-    with pytest.raises(ValueError, match="future_steps > 0"):
-        buffer.sample_batch(["obs"], batch_size=1, her_strategies=["future"])
+    batch = buffer.sample_batch(["x", "y"], batch_size=64)
+
+    assert batch["x"].shape == (64,) and batch["y"].shape == (64, 2)
+    assert torch.equal(batch["y"][:, 0], batch["x"]) and torch.equal(batch["y"][:, 1], -batch["x"])
+    assert set(batch["x"].tolist()) <= {0.0, 1.0, 10.0, 11.0, 20.0, 21.0}
 
 
-def test_sample_batch_her_strategies_require_episode_end_key():
-    buffer = ReplayBuffer(num_envs=1, steps=3)
-    buffer.create_storage_space("obs", ())
-    for t in range(3):
-        buffer.add_records({"obs": torch.tensor([float(t)])})
+def _filled(steps, writes, num_envs=1):
+    buffer = ReplayBuffer(num_envs=num_envs, steps=steps)
+    buffer.create_storage_space("x", ())
+    buffer.create_storage_space("h", (1,))
+    for t in range(writes):
+        x = torch.full((num_envs,), float(t))
+        buffer.add_records({"x": x, "h": x.unsqueeze(-1) + 100})
+    return buffer
 
-    with pytest.raises(ValueError, match="episode end key"):
-        buffer.sample_batch(["obs"], batch_size=1, her_strategies=["final"])
+
+def test_time_order_lists_slots_oldest_first_before_and_after_wrap():
+    assert _filled(5, 3).time_order().tolist() == [0, 1, 2]
+    wrapped = _filled(5, 7)
+    assert wrapped.data["x"][:, 0].tolist() == [5.0, 6.0, 2.0, 3.0, 4.0]
+    assert wrapped.time_order().tolist() == [2, 3, 4, 0, 1]
+    assert wrapped.data["x"][wrapped.time_order(), 0].tolist() == [2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def test_sample_sequence_batches_follow_time_order_after_wrap():
+    buffer = _filled(5, 7)
+
+    batches = list(buffer.sample_sequence_batches(["x"], seq_len=3, batch_size=2, state_keys=["h"], shuffle=False))
+
+    assert len(batches) == 1
+    batch = batches[0]
+    assert batch["x"][:, 0].tolist() == [2.0, 3.0, 4.0]
+    assert batch["x"][:2, 1].tolist() == [5.0, 6.0]
+    assert batch["valid_mask"][:, 1].tolist() == [True, True, False]
+    assert batch["h_init"][:, 0].tolist() == [102.0, 105.0]
+
+
+def test_save_and_load_round_trip(tmp_path):
+    buffer = _filled(5, 7, num_envs=2)
+    path = tmp_path / "buffer.pt"
+    buffer.save(str(path))
+
+    restored = ReplayBuffer(num_envs=1, steps=1)
+    restored.load(str(path))
+
+    assert (restored.num_envs, restored.steps, restored.step, restored.current_size) == (2, 5, 2, 5)
+    assert torch.equal(restored.data["x"], buffer.data["x"])
+    assert torch.equal(restored.time_order(), buffer.time_order())
 
 
 def test_sample_tensor_raises_on_empty_buffer():

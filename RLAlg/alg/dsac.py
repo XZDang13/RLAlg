@@ -1,30 +1,42 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from typing import Sequence
 from ..nn.steps import StochasticContinuousPolicyStep, DistributionStep
+from ._common import validate_same_shape, weighted_models, soft_update, alpha_loss
 
 NNMODEL = nn.Module
 Q_STEPS = tuple[DistributionStep, DistributionStep]
+OBSERVATION = torch.Tensor | dict[str, torch.Tensor]
 
 
 class DSAC:
 
     @staticmethod
     def compute_policy_loss(
-        policy_model: NNMODEL,
-        critic_model: NNMODEL,
-        observation: torch.Tensor|dict[str, torch.Tensor],
+        policy: NNMODEL,
+        critic_model: NNMODEL | Sequence[NNMODEL],
+        *,
+        observations: OBSERVATION,
         alpha: float,
+        critic_observations: OBSERVATION | None = None,
+        critic_weights: Sequence[float] | None = None,
         regularization_weight: float = 0.0
     ) -> dict[str, torch.Tensor]:
-        step: StochasticContinuousPolicyStep = policy_model(observation)
+        critic_observations = observations if critic_observations is None else critic_observations
+        critics = weighted_models(critic_model, critic_weights)
+        step: StochasticContinuousPolicyStep = policy(observations)
+        policy_loss = torch.zeros((), dtype=step.log_prob.dtype, device=step.log_prob.device)
 
-        q1_step, q2_step = critic_model(observation, step.action)
-        q1 = q1_step.mean
-        q2 = q2_step.mean
-        q = torch.min(q1, q2)
+        for critic, weight in critics:
+            q1_step, q2_step = critic(critic_observations, step.action)
+            q1 = q1_step.mean
+            q2 = q2_step.mean
+            validate_same_shape("q1", q1, "q2", q2)
+            q = torch.min(q1, q2)
+            validate_same_shape("log_prob", step.log_prob, "q", q)
 
-        policy_loss = (alpha * step.log_prob - q).mean()
+            policy_loss += (alpha * step.log_prob - q).mean() * weight
+
         policy_loss += (step.mean.pow(2).mean() + step.log_std.pow(2).mean()) * regularization_weight
 
         return {
@@ -33,8 +45,9 @@ class DSAC:
 
     @staticmethod
     def compute_q_targ(
-        reward: torch.Tensor,
-        done: torch.Tensor,
+        *,
+        rewards: torch.Tensor,
+        terminated: torch.Tensor,
         q: torch.Tensor,
         q_next: torch.Tensor,
         next_log_prob: torch.Tensor,
@@ -42,8 +55,12 @@ class DSAC:
         gamma: float,
         td_bound: float
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        done = done.to(dtype=reward.dtype, device=reward.device)
-        q_target = reward + (1 - done) * gamma * (q_next - alpha * next_log_prob)
+        terminated = terminated.to(dtype=rewards.dtype, device=rewards.device)
+        validate_same_shape("rewards", rewards, "terminated", terminated)
+        validate_same_shape("rewards", rewards, "q_next", q_next)
+        validate_same_shape("q_next", q_next, "next_log_prob", next_log_prob)
+        q_target = rewards + (1 - terminated) * gamma * (q_next - alpha * next_log_prob)
+        validate_same_shape("q", q, "q_target", q_target)
         difference = torch.clamp(q_target - q, -td_bound, td_bound)
         q_target_bound = q + difference
 
@@ -51,42 +68,49 @@ class DSAC:
 
     @staticmethod
     def compute_critic_loss(
-        actor_target_model: NNMODEL,
-        critic_model: NNMODEL,
-        critic_target_model: NNMODEL,
-        observation: torch.Tensor|dict[str, torch.Tensor],
-        action: torch.Tensor,
-        reward: torch.Tensor,
-        next_observation: torch.Tensor|dict[str, torch.Tensor],
-        done: torch.Tensor,
+        policy_target: NNMODEL,
+        critic: NNMODEL,
+        critic_target: NNMODEL,
+        *,
+        observations: OBSERVATION,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        next_observations: OBSERVATION,
+        terminated: torch.Tensor,
         alpha: float,
         gamma: float,
-        td_bound: float
+        td_bound: float,
+        critic_observations: OBSERVATION | None = None,
+        next_critic_observations: OBSERVATION | None = None
     ) -> dict[str, torch.Tensor]:
+        critic_observations = observations if critic_observations is None else critic_observations
+        next_critic_observations = next_observations if next_critic_observations is None else next_critic_observations
 
-        q1_step, q2_step = critic_model(observation, action)
+        q1_step, q2_step = critic(critic_observations, actions)
         q1 = q1_step.mean
         q2 = q2_step.mean
         q1_std = q1_step.std
         q2_std = q2_step.std
+        validate_same_shape("q1", q1, "q2", q2)
 
         with torch.no_grad():
-            next_step: StochasticContinuousPolicyStep = actor_target_model(next_observation)
+            next_step: StochasticContinuousPolicyStep = policy_target(next_observations)
 
-            next_q1_step, next_q2_step = critic_target_model(next_observation, next_step.action)
+            next_q1_step, next_q2_step = critic_target(next_critic_observations, next_step.action)
             next_q1_sample = next_q1_step.sample
             next_q2_sample = next_q2_step.sample
+            validate_same_shape("next_q1_sample", next_q1_sample, "next_q2_sample", next_q2_sample)
             next_q_sample = torch.min(next_q1_sample, next_q2_sample)
 
             q_targ, q_targ_bound = DSAC.compute_q_targ(
-                reward,
-                done,
-                torch.min(q1.detach(), q2.detach()),
-                next_q_sample.detach(),
-                next_step.log_prob.detach(),
-                alpha,
-                gamma,
-                td_bound
+                rewards=rewards,
+                terminated=terminated,
+                q=torch.min(q1.detach(), q2.detach()),
+                q_next=next_q_sample.detach(),
+                next_log_prob=next_step.log_prob.detach(),
+                alpha=alpha,
+                gamma=gamma,
+                td_bound=td_bound
             )
 
         bias = 1e-5
@@ -109,28 +133,21 @@ class DSAC:
 
         return {
             "loss": critic_loss,
-            "q1": q1.mean(),
-            "q2": q2.mean(),
+            "q1": q1.mean().detach(),
+            "q2": q2.mean().detach(),
             "q_target": q_targ.mean(),
             "q_target_bound": q_targ_bound.mean()
         }
 
     @staticmethod
     def compute_alpha_loss(
-        policy_model: NNMODEL,
+        policy: NNMODEL,
+        *,
         log_alpha: torch.Tensor,
-        observation: torch.Tensor|dict[str, torch.Tensor],
+        observations: OBSERVATION,
         target_entropy: float
     ) -> dict[str, torch.Tensor]:
-        step: StochasticContinuousPolicyStep = policy_model(observation)
-        alpha_loss = -(log_alpha.exp() * (step.log_prob + target_entropy).detach()).mean()
-        return {
-            "alpha_loss": alpha_loss
-        }
+        step: StochasticContinuousPolicyStep = policy(observations)
+        return alpha_loss(log_alpha, step.log_prob, target_entropy)
 
-    @staticmethod
-    @torch.no_grad()
-    def update_target_param(model: NNMODEL, model_target: NNMODEL, tau: float):
-        for param, param_target in zip(model.parameters(), model_target.parameters()):
-            param_target.data.mul_(1 - tau)
-            param_target.data.add_(tau * param.data)
+    update_target_param = staticmethod(soft_update)

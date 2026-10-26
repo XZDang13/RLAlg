@@ -21,8 +21,10 @@ class StochasticContinuousPolicyStep:
 
 @dataclass
 class DeterministicContinuousPolicyStep:
-    pi: TransformedDistribution
     mean: torch.Tensor
+    # Pre-squash action and bound, for adding exploration noise before the tanh.
+    pre_tanh_mean: torch.Tensor | None = None
+    max_action: torch.Tensor | None = None
 
 @dataclass
 class ValueStep:

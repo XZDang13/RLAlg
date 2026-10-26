@@ -35,7 +35,7 @@ def test_loss_and_solver_accept_the_same_keyword_only_time_signatures():
     eps = torch.ones(3, 2, 1)
     t = torch.full((3, 2, 1), 0.5)
     for actor in (KeywordTimeVelocity(), KeywordTVelocity()):
-        FPO.compute_cmf_loss(actor, obs, actions, eps, t)
+        FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t)
         EulerODESolver.denoise(actor, 4, obs, actions, deterministic=True)
 
 

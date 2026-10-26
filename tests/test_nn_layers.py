@@ -46,13 +46,13 @@ def test_gaussian_head_unbounded_entropy_sums_over_action_dimensions():
     two_actions = GaussianHead(
         feature_dim=4,
         action_dim=2,
-        log_std=0.0,
+        init_std=1.0,
         max_action=None,
     )(x)
     twenty_three_actions = GaussianHead(
         feature_dim=4,
         action_dim=23,
-        log_std=0.0,
+        init_std=1.0,
         max_action=None,
     )(x)
 
@@ -132,11 +132,11 @@ def test_gru_layer_resets_hidden_state_on_episode_starts():
     assert torch.allclose(out[:, 1:2, :], out_reset, atol=1e-6, rtol=1e-5)
 
 
-# Direct std is opt-in; all legacy entropy regression tests above remain intact.
+# std_parameterization="std" stores the std itself; "log_std" (the default) stores its log.
 
 
 def test_direct_std_initial_distribution_matches_legacy_and_sums_23_axes():
-    legacy = GaussianHead(4, 23, log_std=0.0, log_std_min=-5.0, max_action=None)
+    legacy = GaussianHead(4, 23, init_std=1.0, std_min=math.exp(-5), max_action=None)
     direct = GaussianHead(4, 23, std_parameterization='std', init_std=1.0,
                           std_min=math.exp(-5), std_max=math.exp(2))
     direct.mu_layer.load_state_dict(legacy.mu_layer.state_dict())
@@ -165,17 +165,18 @@ def test_direct_std_entropy_gradient_is_inverse_std(std):
 
 
 def test_explicit_legacy_mode_preserves_log_std_parameter_and_constant_entropy_gradient():
-    head = GaussianHead(4, 23, log_std=math.log(2), std_parameterization='log_std')
+    head = GaussianHead(4, 23, init_std=2.0, std_parameterization='log_std')
     step = head(torch.zeros(8, 4))
     torch.testing.assert_close(step.pi.base_dist.scale, torch.full((8, 23), 2.))
     (-0.01 * step.entropy.mean()).backward()
     torch.testing.assert_close(head.log_std.grad, torch.full((23,), -0.01))
-    fixed = GaussianHead(4, 2, log_std=-0.5, learnable_log_std=False)
+    fixed = GaussianHead(4, 2, init_std=math.exp(-0.5), learnable_std=False)
+    torch.testing.assert_close(fixed.log_std, torch.full((2,), -0.5))
     assert 'log_std' in dict(fixed.named_buffers())
 
 
 def test_state_dependent_log_std_retains_existing_transform_and_gradients():
-    head = GaussianHead(4, 3, state_dependent_std=True, log_std_min=-5., log_std_max=2.)
+    head = GaussianHead(4, 3, state_dependent_std=True, std_min=math.exp(-5.), std_max=math.exp(2.))
     x = torch.randn(5, 4)
     step = head(x)
     expected = -5 + 3.5 * (torch.tanh(head.log_std_layer(x)) + 1)
@@ -243,3 +244,52 @@ def test_direct_std_clamps_effective_tensor_without_mutating_parameter():
 def test_gaussian_head_rejects_invalid_direct_std_settings(kwargs):
     with pytest.raises(ValueError):
         GaussianHead(4, 3, **kwargs)
+
+
+@pytest.mark.parametrize('kind', ['gaussian', 'bounded_gaussian', 'categorical'])
+def test_optional_distribution_validation_preserves_values_and_gradients(kind):
+    import copy
+    from RLAlg.nn.layers import GaussianHead, CategoricalHead
+    reference=(CategoricalHead(5,2,validate_args=True) if kind=='categorical'
+               else GaussianHead(5,2,max_action=1 if kind=='bounded_gaussian' else None,validate_args=True))
+    fast=copy.deepcopy(reference);fast.validate_args=False
+    x=torch.randn(7,5)
+    torch.manual_seed(71);old=reference(x)
+    torch.manual_seed(71);new=fast(x)
+    torch.testing.assert_close(old.action,new.action,rtol=0,atol=0)
+    torch.testing.assert_close(old.log_prob,new.log_prob,rtol=0,atol=0)
+    actions=old.action.detach()
+    torch.manual_seed(99);old=reference(x,actions)
+    torch.manual_seed(99);new=fast(x,actions)
+    (old.log_prob.sum()+.01*old.entropy.sum()).backward()
+    (new.log_prob.sum()+.01*new.entropy.sum()).backward()
+    for p,q in zip(reference.parameters(),fast.parameters()):
+        torch.testing.assert_close(p.grad,q.grad,rtol=0,atol=0)
+    assert old.pi._validate_args and not new.pi._validate_args
+
+
+def test_tanh_entropy_uses_the_same_estimator_with_and_without_a_supplied_action():
+    torch.manual_seed(0)
+    head = GaussianHead(4, 3, init_std=0.8, max_action=1.5)
+    x = torch.randn(1, 4).expand(20000, 4)
+    sampled = head(x)
+    # A supplied action (e.g. from an older policy) is not used for the entropy estimate.
+    supplied = head(x, torch.zeros_like(sampled.action))
+    reference = -sampled.log_prob.detach()
+
+    entropy = supplied.entropy.detach()
+    assert abs(entropy.mean() - reference.mean()) < 0.01
+    assert abs(entropy.var() / reference.var() - 1.0) < 0.1
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"init_std": 0.0}, {"std_min": 2.0, "init_std": 1.0}, {"init_std": 10.0}, {"std_max": float("inf")},
+])
+def test_gaussian_head_rejects_invalid_std_ranges(kwargs):
+    with pytest.raises(ValueError):
+        GaussianHead(4, 2, **kwargs)
+
+
+def test_gaussian_head_options_are_keyword_only():
+    with pytest.raises(TypeError):
+        GaussianHead(4, 2, 0.0)

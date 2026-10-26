@@ -37,19 +37,35 @@ Import algorithm classes from their modules, for example
 | `DSACT` | [dsact.py](RLAlg/alg/dsact.py) | Distributional twin critics with running standard deviation statistics |
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | Flow action sampling, CMF losses, clipped flow policy optimization |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | Offline expectile value regression and advantage-weighted policy fitting |
+| `SHAC` | [shac.py](RLAlg/alg/shac.py) | Short-horizon analytic policy gradients through a differentiable simulator, TD(λ) value targets |
 
-DDPG, DDPGDoubleQ, and SAC also provide asymmetric actor/critic observation
-interfaces and weighted multiple-critic policy losses. SAC, DSAC, and DSACT
-expose `compute_alpha_loss`; its optimization tensor is stored under
-`"alpha_loss"`. Policy, value, and critic loss dictionaries use `"loss"`, with
-additional metrics depending on the method.
+All loss functions share one calling convention:
 
-Target networks are created and scheduled by the caller. The corresponding
-`update_target_param(model, model_target, tau)` methods update target parameters
-as `(1 - tau) * target + tau * source`.
+- Models are positional; every tensor and hyperparameter after them is
+  keyword-only, for example
+  `SAC.compute_critic_loss(actor, critic, critic_target, observations=..., actions=...,
+  rewards=..., next_observations=..., terminated=..., alpha=0.2, gamma=0.99)`.
+  `terminated` is the true-termination mask; timeouts should still bootstrap.
+- Every result is a dictionary whose optimization tensor is `"loss"`, including
+  `compute_alpha_loss`. Other entries are detached metrics, such as `"q1"`,
+  `"q2"`, and `"q_target"` for twin critics.
+- Value and Q regressions use `0.5 * mean((prediction - target) ** 2)`, summed
+  over twin critics. Predictions, targets, rewards, and termination masks must
+  have the same shape; a `[B, 1]` reward against `[B]` values raises an error.
+- Off-policy losses take `critic_observations` / `next_critic_observations` for
+  asymmetric actor-critic setups; by default critics see the actor's
+  observations. Policy losses accept a list of critics with `critic_weights`.
+  PPO accepts a list of advantages with `advantage_weights`, and
+  `episode_starts`, `initial_state`, and `valid_mask` for recurrent models.
 
-DSACT stores running statistics in the class attributes `q1_mean_std` and
-`q2_mean_std`. Set both to `None` before starting an independent training run.
+Target networks are created and scheduled by the caller.
+`update_target_param(model, model_target, tau)` updates target parameters as
+`(1 - tau) * target + tau * source` and copies buffers such as normalizer
+statistics.
+
+DSACT keeps running averages of the critic standard deviations. Pass
+`q_mean_std=None` on the first critic update and the returned
+`result["q_mean_std"]` on later updates.
 
 ## Model interfaces
 
@@ -62,7 +78,7 @@ advantages normally have shape `[B]`, rather than `[B, 1]`.
 | --- | --- | --- |
 | `DiscretePolicyStep` | `pi`, `action`, `log_prob`, `entropy` | Discrete PPO or IQL policy |
 | `StochasticContinuousPolicyStep` | `pi`, `action`, `log_prob`, `mean`, `log_std`, `entropy` | Continuous PPO, SAC, DSAC, DSACT, or IQL policy |
-| `DeterministicContinuousPolicyStep` | `pi`, `mean` | DDPG or DDPGDoubleQ policy |
+| `DeterministicContinuousPolicyStep` | `mean`, `pre_tanh_mean`, `max_action` | DDPG or DDPGDoubleQ policy |
 | `ValueStep` | `value` | State value or scalar Q prediction |
 | `DistributionStep` | `pi`, `mean`, `std`, `sample` | Distributional Q prediction |
 | `FPOStep` | `action`, `action_path`, `eps`, `time_step`, `init_cmf_loss` | Flow sampling result and optional stored CMF targets |
@@ -115,10 +131,10 @@ advantages = torch.randn(32)
 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 returns = torch.randn(32)
 policy_result = PPO.compute_policy_loss(
-    policy, old_step.log_prob, observations, old_step.action,
-    advantages, clip_ratio=0.2, entropy_coef=0.01,
+    policy, log_probs_hat=old_step.log_prob, observations=observations,
+    actions=old_step.action, advantages=advantages, clip_ratio=0.2, entropy_coef=0.01,
 )
-value_result = PPO.compute_value_loss(value_model, observations, returns)
+value_result = PPO.compute_value_loss(value_model, observations=observations, returns=returns)
 loss = policy_result["loss"] + 0.5 * value_result["loss"]
 optimizer.zero_grad(set_to_none=True)
 loss.backward()
@@ -127,8 +143,16 @@ print({key: metric.detach().item() for key, metric in policy_result.items()})
 ```
 
 `GaussianHead` provides continuous policies, optionally with scaled tanh action
-bounds. Its default `std_parameterization="log_std"` learns log standard deviation;
-`std_parameterization="std"` with `init_std` learns standard deviation directly.
+bounds. Its standard deviation is configured in std units for every mode:
+`init_std` is the initial value and `[std_min, std_max]` the allowed range
+(defaults `1`, `e^-20`, and `e^2`). The default `std_parameterization="log_std"`
+learns log standard deviation, `"std"` learns it directly, `learnable_std=False`
+fixes it, and `state_dependent_std=True` predicts it from the features. With tanh
+bounds, `entropy` is the one-sample estimate `-log_prob(a')` with `a'` drawn from
+the current policy, so it does not use a supplied action from an older policy.
+`DeterministicHead` returns the deterministic action only; DDPGDoubleQ adds its
+exploration and target noise with `DDPGDoubleQ.perturb_action(step, std)`, before
+the tanh.
 The other heads and layer builders are in [layers.py](RLAlg/nn/layers.py).
 `NormPosition.NONE`, `PRE`, and `POST` control normalization placement.
 
@@ -141,7 +165,7 @@ transition per environment, and total capacity is `steps × num_envs`.
 
 ```python
 import torch
-from RLAlg.buffer.replay_buffer import ReplayBuffer, compute_gae
+from RLAlg.buffer import ReplayBuffer, compute_gae
 
 buffer = ReplayBuffer(num_envs=4, steps=8, device=torch.device("cpu"))
 buffer.create_storage_space("observations", (3,))
@@ -158,9 +182,8 @@ values = torch.zeros(8, 4)
 terminated = torch.zeros(8, 4, dtype=torch.bool)
 truncated = torch.zeros_like(terminated)
 returns, advantages = compute_gae(
-    rewards, values, terminated, last_values=torch.zeros(4),
+    rewards=rewards, values=values, terminated=terminated, last_values=torch.zeros(4),
     gamma=0.99, lambda_=0.95, truncated=truncated,
-    bootstrap_timeouts=False,
 )
 assert returns.shape == advantages.shape == (8, 4)
 ```
@@ -170,20 +193,122 @@ iterates over shuffled minibatches of stored transitions. `reset` clears a
 rollout; `save` and `load` persist the buffer. `sample_sequence_batches` returns
 time-major chunks with a `valid_mask` and optional initial-state fields. For
 recurrent on-policy updates, collect a fresh rollout before sampling sequences.
+Storage is circular: once full, new steps overwrite the oldest, so
+`data[:current_size]` is no longer in time order. `time_order()` returns the
+storage slots oldest first, and `sample_sequence_batches` uses it.
 
-`compute_gae` returns returns and normalized advantages, using both `terminated`
-and `truncated` as episode boundaries. Use at least two transitions for advantage
-normalization. When bootstrapping a timeout from its actual final observation,
+Return and advantage estimators live in
+[advantages.py](RLAlg/buffer/advantages.py) and take keyword arguments only.
+`compute_gae` and `compute_advantage_mc` return returns and advantages, using both
+`terminated` and `truncated` as episode boundaries; `compute_returns` does the
+same for discounted returns. Advantages are standardized unless `normalize=False`
+(for example when normalizing per minibatch or combining several critics);
+normalization needs at least two transitions. When bootstrapping a timeout from its actual final observation,
 add `gamma * V(final_obs)` to that reward yourself and keep
 `bootstrap_timeouts=False`. The optional `True` mode instead uses the
 current-value convention, adding `gamma * values[t]` at timeouts; do not apply
 both corrections. Off-policy `done` masks should represent true termination
 when timeouts are intended to bootstrap from the actual next observation.
 
-For goal-conditioned tasks, [HindsightExperienceReplay](RLAlg/buffer/her.py)
-relabels goals and optionally recomputes rewards and termination flags.
-`ReplayBuffer.sample_batch(..., her_strategies=...)` supplies the goal candidates
-for the `future`, `final`, `episode`, and `random` strategies.
+For goal-conditioned tasks, [HERReplayBuffer](RLAlg/buffer/her.py) is a
+`ReplayBuffer` that records episode boundaries as transitions are added and
+relabels goals when sampling:
+
+```python
+from RLAlg.buffer import HERReplayBuffer, env_reward_fn
+
+buffer = HERReplayBuffer(
+    num_envs, steps, device,
+    reward_fn=env_reward_fn(envs),  # or any f(achieved, desired) -> reward
+    strategy="future", replay_k=4,
+)
+for key, shape in (("observations", obs_shape), ("desired_goal", goal_shape),
+                   ("next_achieved_goal", goal_shape), ("rewards", ())):
+    buffer.create_storage_space(key, shape)
+buffer.create_storage_space("terminated", ())
+buffer.create_storage_space("episode_end", (), torch.bool)
+
+buffer.add_records({..., "terminated": terminated, "episode_end": terminated | truncated})
+batch = buffer.sample_batch(["observations", "desired_goal", "rewards", "terminated"], 256)
+```
+
+A fraction `1 - 1 / (1 + replay_k)` of the sampled transitions gets the goal
+achieved after a step `t'` of its own episode, and its reward is recomputed as
+`reward_fn(next_achieved_goal_t, goal)`. `future` draws `t'` uniformly from
+`t` to the episode's end (so `t' = t` is an immediate success), `final` uses the
+last step, and `episode` draws from the episode's steps still in the buffer. An
+unfinished episode ends, for now, at its latest stored step. `batch["her_mask"]`
+marks the relabeled rows. `episode_end` must include timeouts; keep true
+terminations in a separate key for the Bellman mask. Pass `done_fn` and
+`done_key` to also recompute termination for tasks that end on success.
+`env_reward_fn` wraps a Gymnasium-Robotics `compute_reward`; for a vector env it
+uses the first sub-env, which computes rewards for a whole batch.
+
+## Short-Horizon Actor-Critic
+
+SHAC needs a differentiable environment, such as DFlex, Warp, MJX, Brax, or
+Genesis. The actor gradient comes from backpropagating through the simulator,
+so `rewards` and `next_values` must keep their autograd graph. All rollout
+tensors are time-major `[H, N]`. `next_values[t]` is `V(s_{t+1})` on the actual
+next observation, which is the final observation before an automatic reset.
+The reference implementation computes it with a target critic.
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.shac import SHAC
+from RLAlg.nn.steps import ValueStep
+
+class Critic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.net(obs).squeeze(-1))
+
+policy, critic = nn.Linear(3, 3), Critic()
+H, N, gamma = 8, 4, 0.99
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, rewards, next_values = [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+truncated = torch.zeros_like(terminated)
+for t in range(H):
+    observations.append(state.detach())
+    state = state + 0.1 * torch.tanh(policy(state))  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    next_values.append(critic(state).value)  # final obs before reset when done
+rewards, next_values = torch.stack(rewards), torch.stack(next_values)
+
+policy_result = SHAC.compute_policy_loss(
+    rewards=rewards, next_values=next_values, terminated=terminated,
+    gamma=gamma, truncated=truncated,
+)
+policy_result["loss"].backward()  # then step only the policy optimizer
+
+targets = SHAC.compute_td_lambda_targets(
+    rewards=rewards, next_values=next_values, terminated=terminated,
+    gamma=gamma, lambda_=0.95, truncated=truncated,
+)
+value_result = SHAC.compute_value_loss(
+    critic, observations=torch.stack(observations), targets=targets,
+)
+assert targets.shape == (H, N)
+```
+
+The policy loss is the negative return `sum_t gamma^t r_t + gamma^h V(s_h)`,
+divided by `H * N`. An episode that ends inside the rollout contributes its own
+segment, and the discount restarts after it. Terminated steps never bootstrap,
+and non-finite values at terminal observations are masked out. Truncated steps
+and the last rollout step bootstrap from `next_values`. `compute_td_lambda_targets`
+detaches its inputs and uses the same boundaries; `lambda_=0` gives one-step
+targets. `compute_value_loss` uses the library's `0.5` MSE; the reference SHAC
+omits the `0.5`, which with Adam only changes the effect of gradient clipping.
+
+The policy backward pass also writes gradients into the critic. Zero the critic
+gradients before its update, or compute `next_values` with a target critic that
+`SHAC.update_target_param` keeps up to date. To cut gradients between
+rollouts, detach the simulator state before the next rollout starts.
 
 ## Flow Policy Optimization
 
@@ -218,15 +343,15 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 observations = torch.randn(32, 4)
 target = SuperviseTarget.Noise
 step = FPO.sample_actions_with_cmf_info(
-    policy, observations, torch.randn(32, 2), flow_steps=8,
+    policy, observations=observations, init_noise=torch.randn(32, 2), flow_steps=8,
     n_samples_per_action=10, supervise_target=target,
     time_step_sampler=TimeStepSamplerStrategy.Continuous,
 )
 advantages = torch.linspace(-1, 1, 32)  # Replace with rollout advantages.
 result = FPO.compute_policy_loss(
-    policy, observations, step.action, step.eps, step.time_step,
-    step.init_cmf_loss, advantages, clip_ratio=0.05,
-    supervise_target=target,
+    policy, observations=observations, actions=step.action, eps=step.eps,
+    t=step.time_step, init_cmf_loss=step.init_cmf_loss, advantages=advantages,
+    clip_ratio=0.05, supervise_target=target,
 )
 optimizer.zero_grad(set_to_none=True)
 result["loss"].backward()
@@ -287,7 +412,8 @@ python -m pytest -q
 ```
 
 Tests cover algorithm losses, shape checks, termination masks, recurrent
-networks, replay/HER, normalization, logging, and FPO sampling and gradients.
+networks, replay/HER, normalization, logging, FPO sampling and gradients, and
+SHAC gradients through a differentiable toy rollout.
 
 ## License
 

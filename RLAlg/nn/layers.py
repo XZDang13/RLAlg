@@ -265,23 +265,15 @@ class GRULayer(nn.Module):
     
 class DeterministicHead(nn.Module):
     """
-    Deterministic policy head.
+    Deterministic policy head, optionally squashed into ``[-max_action, max_action]`` by tanh.
+
+    Exploration noise is left to the caller; ``DDPGDoubleQ.perturb_action`` adds it before
+    the tanh using the step's ``pre_tanh_mean``.
     """
     def __init__(self, feature_dim: int, action_dim: int, max_action: Union[float, torch.Tensor, None] = None) -> None:
         super().__init__()
         self.linear = nn.Linear(feature_dim, action_dim)
         self.max_action = max_action
-
-        if self.max_action is not None:
-            self.transform = ComposeTransform(
-                [
-                    TanhTransform(),
-                    AffineTransform(loc=0, scale=max_action)
-                ],
-                cache_size=1
-            )
-        else:
-            self.transform = []
 
         self.reset_parameters()
 
@@ -290,8 +282,7 @@ class DeterministicHead(nn.Module):
         if self.linear.bias is not None:
             nn.init.uniform_(self.linear.bias, -3e-3, 3e-3)
 
-
-    def forward(self, x:torch.Tensor, std:float=1.0) -> DeterministicContinuousPolicyStep:
+    def forward(self, x: torch.Tensor) -> DeterministicContinuousPolicyStep:
         """
         Args:
             x: input features
@@ -300,85 +291,73 @@ class DeterministicHead(nn.Module):
             deterministic action in [-max_action, max_action]
         """
         mu = self.linear(x)
-        base_pi = Normal(mu, std)
-        pi = TransformedDistribution(base_pi, self.transform)
-        if self.max_action is not None:
-            mu_squashed = self.max_action * torch.tanh(mu)
-        else:
-            mu_squashed = mu
-
-        step = DeterministicContinuousPolicyStep(pi, mu_squashed)
-        return step
+        if self.max_action is None:
+            return DeterministicContinuousPolicyStep(mu)
+        max_action = torch.as_tensor(self.max_action, dtype=mu.dtype, device=mu.device)
+        return DeterministicContinuousPolicyStep(max_action * torch.tanh(mu), mu, max_action)
 
 class GaussianHead(nn.Module):
     """
-    Gaussian policy head.
-    Supports legacy log_std or explicit direct std for state-independent noise.
-    State-dependent noise retains its existing log_std network.
+    Gaussian policy head, optionally squashed into ``[-max_action, max_action]`` by tanh.
+
+    The standard deviation is configured in std units for every mode:
+    ``init_std`` is the initial value and ``[std_min, std_max]`` the allowed range.
+
+    - ``state_dependent_std=True``: a linear layer predicts ``log_std``, squashed by tanh
+      into ``[log(std_min), log(std_max)]``.
+    - otherwise a state-independent ``log_std`` (``std_parameterization="log_std"``) or
+      ``std`` (``"std"``) vector, learnable unless ``learnable_std=False``.
+
+    With tanh squashing the entropy has no closed form; ``entropy`` is the one-sample
+    estimate ``-log_prob(a')`` with ``a'`` the sampled action or, when an action is
+    supplied (as in PPO updates), a fresh reparameterized sample from the current policy.
+    This has much lower variance than adding a sampled log-det term to the analytic
+    base entropy, because the two terms of ``log_prob`` largely cancel.
     """
     def __init__(
         self,
         feature_dim: int,
         action_dim: int,
-        log_std:float = 0,
-        log_std_min: float = -20,
-        log_std_max: float = 2,
-        learnable_log_std: bool = True,
-        max_action: Union[float,torch.Tensor, None] = None,
-        state_dependent_std: bool = False,
         *,
+        max_action: Union[float, torch.Tensor, None] = None,
+        state_dependent_std: bool = False,
         std_parameterization: str = "log_std",
         init_std: float = 1.0,
         std_min: float = math.exp(-20.0),
         std_max: float = math.exp(2.0),
         learnable_std: bool = True,
+        validate_args: bool | None = None,
     ) -> None:
         super().__init__()
+        # None preserves PyTorch's default. Trusted GPU training batches may
+        # opt out of distribution checks that otherwise read scalars on CPU.
+        self.validate_args = validate_args
         if std_parameterization not in {"log_std", "std"}:
             raise ValueError("std_parameterization must be 'log_std' or 'std'.")
         if state_dependent_std and std_parameterization != "log_std":
             raise ValueError("Direct std is only supported for state-independent noise.")
+        if not all(math.isfinite(v) for v in (init_std, std_min, std_max)):
+            raise ValueError("init_std, std_min and std_max must be finite.")
+        if not 0.0 < std_min <= init_std <= std_max:
+            raise ValueError("The std range requires 0 < std_min <= init_std <= std_max.")
         self.std_parameterization = std_parameterization
-        if std_parameterization == "std":
-            if not all(math.isfinite(v) for v in (init_std, std_min, std_max)):
-                raise ValueError("init_std, std_min and std_max must be finite.")
-            if not 0.0 < std_min <= init_std <= std_max:
-                raise ValueError("Direct std requires 0 < std_min <= init_std <= std_max.")
-            self.std_min = float(std_min)
-            self.std_max = float(std_max)
-
-        self.mu_layer = nn.Linear(feature_dim, action_dim)
-
         self.state_dependent_std = state_dependent_std
-        if state_dependent_std:
-            self.log_std_layer = nn.Linear(feature_dim, action_dim)
-        elif std_parameterization == "std":
-            # log_std/learnable_log_std retain their legacy meaning; this
-            # explicitly selected mode uses init_std/learnable_std instead.
-            if learnable_std:
-                self.std = nn.Parameter(torch.full((action_dim,), float(init_std)))
-            else:
-                self.register_buffer("std", torch.full((action_dim,), float(init_std)))
-        else:
-            if learnable_log_std:
-                self.log_std = nn.Parameter(torch.ones(action_dim)*log_std)
-            else:
-                self.register_buffer("log_std", torch.ones(action_dim) * log_std)
-
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
+        self.std_min = float(std_min)
+        self.std_max = float(std_max)
+        self.log_std_min = math.log(std_min)
+        self.log_std_max = math.log(std_max)
         self.max_action = max_action
 
-        if self.max_action is not None:
-            self.transform = ComposeTransform(
-                [
-                    TanhTransform(),
-                    AffineTransform(loc=0, scale=max_action)
-                ],
-                cache_size=1
-            )
+        self.mu_layer = nn.Linear(feature_dim, action_dim)
+        if state_dependent_std:
+            self.log_std_layer = nn.Linear(feature_dim, action_dim)
         else:
-            self.transform = []
+            name = std_parameterization
+            value = torch.full((action_dim,), float(init_std if name == "std" else math.log(init_std)))
+            if learnable_std:
+                setattr(self, name, nn.Parameter(value))
+            else:
+                self.register_buffer(name, value)
 
         self.reset_parameters()
 
@@ -391,6 +370,17 @@ class GaussianHead(nn.Module):
             nn.init.uniform_(self.log_std_layer.weight, -3e-3, 3e-3)
             if self.log_std_layer.bias is not None:
                 nn.init.uniform_(self.log_std_layer.bias, -3e-3, 3e-3)
+
+    def _std(self, x: torch.Tensor, mu: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.state_dependent_std:
+            log_std = torch.tanh(self.log_std_layer(x))
+            log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
+            return log_std, torch.exp(log_std)
+        if self.std_parameterization == "std":
+            std = torch.clamp(self.std, min=self.std_min, max=self.std_max).expand_as(mu)
+            return torch.log(std), std
+        log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max).expand_as(mu)
+        return log_std, torch.exp(log_std)
 
     def forward(
         self,
@@ -406,93 +396,55 @@ class GaussianHead(nn.Module):
             pi: TransformedDistribution
             action: [B, action_dim]
             log_prob: [B]
-            mu: [B, action_dim]
+            mu: [B, action_dim] (squashed when max_action is set)
             log_std: [B, action_dim]
+            entropy: [B]
         """
         mu = self.mu_layer(x)
-        eps = 1e-6
+        log_std, std = self._std(x, mu)
+        base_pi = Normal(mu, std, validate_args=self.validate_args)
 
-        if self.state_dependent_std:
-            log_std = self.log_std_layer(x)
-            log_std = torch.tanh(log_std)
-            log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
-            std = torch.exp(log_std)
-        elif self.std_parameterization == "std":
-            std = torch.clamp(self.std, min=self.std_min, max=self.std_max).expand_as(mu)
-            log_std = torch.log(std)
-        else:
-            log_std = self.log_std.expand_as(mu)
-            log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-            std = torch.exp(log_std)
-
-        base_pi = Normal(mu, std)
-        if self.max_action is not None:
-            max_action = torch.as_tensor(self.max_action, dtype=mu.dtype, device=mu.device)
-            max_action = torch.clamp(torch.abs(max_action), min=eps)
-            transform = ComposeTransform(
-                [
-                    TanhTransform(),
-                    AffineTransform(loc=0, scale=max_action),
-                ],
-                cache_size=1,
-            )
-        else:
-            max_action = None
-            transform = self.transform
-
-        pi = TransformedDistribution(base_pi, transform)
-
-        sampled_action = False
-        if action is None:
-            sampled_action = True
-            if max_action is not None:
-                pre_tanh_action = base_pi.rsample()
-                squashed_action = torch.tanh(pre_tanh_action)
-                action = squashed_action * max_action
-            else:
-                action = pi.rsample()
-                pre_tanh_action = None
-                squashed_action = None
-        else:
-            pre_tanh_action = None
-            squashed_action = None
-
-        if max_action is not None:
-            if pre_tanh_action is None:
-                scaled_action = action / max_action
-                scaled_action = scaled_action.clamp(-1 + eps, 1 - eps)
-                action = scaled_action * max_action
-                pre_tanh_action = 0.5 * (torch.log1p(scaled_action) - torch.log1p(-scaled_action))
-                squashed_action = scaled_action
-            log_det = torch.log(max_action * (1 - squashed_action.pow(2)) + eps)
-            log_prob = (base_pi.log_prob(pre_tanh_action) - log_det).sum(axis=-1)
-        else:
-            log_prob = pi.log_prob(action).sum(axis=-1)
-
-        # deterministic mu after squashing if needed
-        if max_action is not None:
-            mu_squashed = max_action * torch.tanh(mu)
-            if sampled_action:
-                entropy = -log_prob
-            else:
-                entropy_pre_tanh = base_pi.rsample()
-                entropy_squashed = torch.tanh(entropy_pre_tanh)
-                entropy_log_det = torch.log(max_action * (1 - entropy_squashed.pow(2)) + eps)
-                entropy = -(base_pi.log_prob(entropy_pre_tanh) - entropy_log_det).sum(dim=-1)
-        else:
-            mu_squashed = mu
+        if self.max_action is None:
+            pi = TransformedDistribution(base_pi, [], validate_args=self.validate_args)
+            if action is None:
+                action = base_pi.rsample()
+            log_prob = base_pi.log_prob(action).sum(dim=-1)
             entropy = base_pi.entropy().sum(dim=-1)
+            return StochasticContinuousPolicyStep(pi, action, log_prob, mu, log_std, entropy)
 
-        step = StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
+        eps = 1e-6
+        max_action = torch.as_tensor(self.max_action, dtype=mu.dtype, device=mu.device)
+        max_action = torch.clamp(torch.abs(max_action), min=eps)
+        transform = ComposeTransform([TanhTransform(), AffineTransform(loc=0, scale=max_action)], cache_size=1)
+        pi = TransformedDistribution(base_pi, transform, validate_args=self.validate_args)
 
-        return step
+        def squashed_log_prob(pre_tanh: torch.Tensor, squashed: torch.Tensor) -> torch.Tensor:
+            log_det = torch.log(max_action * (1 - squashed.pow(2)) + eps)
+            return (base_pi.log_prob(pre_tanh) - log_det).sum(dim=-1)
+
+        if action is None:
+            pre_tanh_action = base_pi.rsample()
+            squashed_action = torch.tanh(pre_tanh_action)
+            action = squashed_action * max_action
+            log_prob = squashed_log_prob(pre_tanh_action, squashed_action)
+            entropy = -log_prob
+        else:
+            squashed_action = (action / max_action).clamp(-1 + eps, 1 - eps)
+            action = squashed_action * max_action
+            pre_tanh_action = 0.5 * (torch.log1p(squashed_action) - torch.log1p(-squashed_action))
+            log_prob = squashed_log_prob(pre_tanh_action, squashed_action)
+            entropy_sample = base_pi.rsample()
+            entropy = -squashed_log_prob(entropy_sample, torch.tanh(entropy_sample))
+        mu_squashed = max_action * torch.tanh(mu)
+        return StochasticContinuousPolicyStep(pi, action, log_prob, mu_squashed, log_std, entropy)
 
 class CategoricalHead(nn.Module):
     """
     Categorical (discrete) policy head.
     """
-    def __init__(self, feature_dim: int, action_dim: int) -> None:
+    def __init__(self, feature_dim: int, action_dim: int, *, validate_args: bool | None = None) -> None:
         super().__init__()
+        self.validate_args = validate_args
         self.logit_layer = nn.Linear(feature_dim, action_dim)
         self.reset_parameters()
 
@@ -513,7 +465,7 @@ class CategoricalHead(nn.Module):
             distribution, action, log_prob
         """
         logits = self.logit_layer(x)
-        pi = Categorical(logits=logits)
+        pi = Categorical(logits=logits, validate_args=self.validate_args)
         if action is None:
             action = pi.sample()
         log_prob = pi.log_prob(action)

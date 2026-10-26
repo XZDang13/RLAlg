@@ -1,100 +1,6 @@
 from typing import Generator, Any, Optional
 import torch
 
-@torch.no_grad()
-def compute_returns(
-    rewards: torch.Tensor,        # [T, N]
-    terminated: torch.Tensor,     # [T, N] true terminal mask (not truncation)
-    last_values: torch.Tensor,    # [N] = V(s_T)
-    gamma: float = 0.99,
-) -> torch.Tensor:
-    T, N = rewards.shape
-    returns = torch.zeros_like(rewards)
-
-    terminated = terminated.to(dtype=rewards.dtype, device=rewards.device)
-    not_term = 1.0 - terminated
-    next_return = last_values.to(dtype=rewards.dtype, device=rewards.device)
-
-    for t in reversed(range(T)):
-        next_return = rewards[t] + gamma * next_return * not_term[t]
-        returns[t] = next_return
-
-    return returns
-
-
-@torch.no_grad()
-def compute_advantage_mc(
-    rewards: torch.Tensor,
-    values: torch.Tensor,
-    terminated: torch.Tensor,
-    last_values: torch.Tensor,
-    gamma: float = 0.99,
-):
-    returns = compute_returns(rewards, terminated, last_values, gamma)
-    advantages = returns - values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    return returns, advantages
-
-@torch.no_grad()
-def compute_gae(
-    rewards: torch.Tensor,        # [T, N]
-    values: torch.Tensor,         # [T, N]
-    terminated: torch.Tensor,     # [T, N] true terminal mask (not truncation)
-    last_values: torch.Tensor,    # [N]
-    gamma: float = 0.99,
-    lambda_: float = 0.95,
-    *,
-    truncated: Optional[torch.Tensor] = None,
-    bootstrap_timeouts: bool = False,
-):
-    """Compute normalized GAE with explicit termination and timeout semantics.
-
-    Timeouts are always episode boundaries.  When ``bootstrap_timeouts`` is
-    enabled, their reward receives the current-value bootstrap convention used
-    by the Isaac Lab RSL-RL integration before the recursion is cut.
-    """
-    if rewards.ndim != 2:
-        raise ValueError(f"rewards must have shape [T, N], got {tuple(rewards.shape)}.")
-    for name, tensor in {"values": values, "terminated": terminated}.items():
-        if tensor.shape != rewards.shape:
-            raise ValueError(
-                f"{name} must have shape {tuple(rewards.shape)}, got {tuple(tensor.shape)}."
-            )
-    if last_values.shape != rewards.shape[1:]:
-        raise ValueError(
-            f"last_values must have shape {tuple(rewards.shape[1:])}, got {tuple(last_values.shape)}."
-        )
-    if truncated is None:
-        truncated = torch.zeros_like(terminated, dtype=torch.bool)
-    elif truncated.shape != rewards.shape:
-        raise ValueError(
-            f"truncated must have shape {tuple(rewards.shape)}, got {tuple(truncated.shape)}."
-        )
-
-    T, N = rewards.shape
-    advantages = torch.zeros_like(rewards)
-    returns = torch.zeros_like(rewards)
-
-    terminated = terminated.to(dtype=torch.bool, device=rewards.device)
-    truncated = truncated.to(dtype=torch.bool, device=rewards.device)
-    boundaries = terminated | truncated
-    not_boundary = 1.0 - boundaries.to(dtype=rewards.dtype)
-    gae_rewards = rewards
-    if bootstrap_timeouts:
-        gae_rewards = rewards + gamma * values * truncated.to(dtype=rewards.dtype)
-    next_value = last_values.to(dtype=rewards.dtype, device=rewards.device)
-    next_adv = torch.zeros((N,), dtype=rewards.dtype, device=rewards.device)
-
-    for t in reversed(range(T)):
-        delta = gae_rewards[t] + gamma * next_value * not_boundary[t] - values[t]
-        next_adv = delta + gamma * lambda_ * next_adv * not_boundary[t]
-        advantages[t] = next_adv
-        next_value = values[t]
-
-    returns = advantages + values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    return returns, advantages
-
 class ReplayBuffer:
     def __init__(self, num_envs: int, steps: int, device: torch.device = torch.device("cpu")):
         self.num_envs = num_envs
@@ -158,157 +64,32 @@ class ReplayBuffer:
             idx = indices[start:start + batch_size]
             yield {key: value[idx] for key, value in batch.items()}
 
-    def sample_batch(
-        self,
-        key_names: list[str],
-        batch_size: int,
-        future_steps: int = 0,
-        episode_end_key: Optional[str] = None,
-        her_strategies: Optional[list[str]] = None,
-    ) -> dict[str, torch.Tensor]:
-        """Sample a flat batch and optionally attach HER relabel goal tensors.
+    def time_order(self) -> torch.Tensor:
+        """Storage slots of the stored steps, oldest first.
 
-        Args:
-            key_names: Keys to sample from storage.
-            batch_size: Number of sampled transitions.
-            future_steps: Maximum look-ahead steps for ``future`` strategy.
-            episode_end_key: Optional episode-end key override (defaults to
-                ``done`` then ``terminated`` if available).
-            her_strategies: Optional HER goal strategies. Supported values:
-                ``future``, ``final``, ``episode``, ``random``.
-
-        Returns:
-            A dict with sampled base keys and optional strategy keys:
-            ``{key}_future``, ``{key}_final``, ``{key}_episode``, ``{key}_random``.
-
-        Notes:
-            If ``her_strategies`` is ``None``, behavior is backward compatible:
-            only ``future`` goals are generated when ``future_steps > 0``.
-            Strategies ``future/final/episode`` require episode boundaries.
+        Once the circular buffer wraps, the oldest step is at the write pointer,
+        so ``data[:current_size]`` is no longer in time order.
         """
+        if self.current_size < self.steps:
+            return torch.arange(self.current_size, device=self.device)
+        return (torch.arange(self.steps, device=self.device) + self.step) % self.steps
+
+    def sample_batch(self, key_names: list[str], batch_size: int) -> dict[str, torch.Tensor]:
+        """Sample a flat batch of transitions uniformly with replacement."""
         total = self.current_size * self.num_envs
         if total == 0:
             raise ValueError("Cannot sample from an empty buffer.")
-        if future_steps < 0:
-            raise ValueError(f"future_steps must be non-negative, got {future_steps}.")
         indices = torch.randint(0, total, (batch_size,), device=self.device)
+        return self._gather(key_names, indices // self.num_envs, indices % self.num_envs)
 
-        batch = {}
+    def _gather(
+        self, key_names: list[str], slots: torch.Tensor, envs: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
         for key in key_names:
-            data = self.data[key]
-            shape = data.shape[2:]
-            flat = data[:self.current_size].reshape(total, *shape)
-            batch[key] = flat[indices]
+            if key not in self.data:
+                raise ValueError(f"Key '{key}' not found in buffer.")
+        return {key: self.data[key][slots, envs] for key in key_names}
 
-        valid_strategies = {"future", "final", "episode", "random"}
-        if her_strategies is None:
-            strategies: list[str] = ["future"] if future_steps > 0 else []
-        else:
-            strategies = list(dict.fromkeys(her_strategies))
-            invalid = [s for s in strategies if s not in valid_strategies]
-            if invalid:
-                raise ValueError(
-                    f"Invalid her_strategies {invalid}. "
-                    f"Expected subset of {sorted(valid_strategies)}."
-                )
-
-        if not strategies:
-            return batch
-        if "future" in strategies and future_steps == 0:
-            raise ValueError(
-                "future strategy requires future_steps > 0."
-            )
-
-        needs_episode_boundary = any(s in {"future", "final", "episode"} for s in strategies)
-        if not needs_episode_boundary:
-            for key in key_names:
-                data = self.data[key]
-                shape = data.shape[2:]
-                flat = data[:self.current_size].reshape(total, *shape)
-                batch[f"{key}_random"] = flat[torch.randint(0, total, (batch_size,), device=self.device)]
-            return batch
-
-        if episode_end_key is None:
-            if "done" in self.data:
-                episode_end_key = "done"
-            elif "terminated" in self.data:
-                episode_end_key = "terminated"
-            else:
-                raise ValueError(
-                    "HER relabeling requires an episode end key. "
-                    "Pass episode_end_key or add a 'done'/'terminated' storage key."
-                )
-        if episode_end_key not in self.data:
-            raise ValueError(f"Episode end key '{episode_end_key}' not found in buffer.")
-
-        end_data = self.data[episode_end_key][:self.current_size]
-        if end_data.ndim == 2:
-            end_mask = end_data.to(dtype=torch.bool)
-        else:
-            end_mask = end_data.to(dtype=torch.bool).reshape(
-                self.current_size, self.num_envs, -1
-            ).any(dim=-1)
-
-        step_indices = indices // self.num_envs
-        env_indices = indices % self.num_envs
-        episode_start_indices = step_indices.clone()
-        episode_end_indices = step_indices.clone()
-
-        for i in range(batch_size):
-            step = int(step_indices[i].item())
-            env = int(env_indices[i].item())
-            future_terminated_rel = torch.where(end_mask[step:, env])[0]
-            if future_terminated_rel.numel() > 0:
-                episode_end = step + int(future_terminated_rel[0].item())
-            else:
-                episode_end = self.current_size - 1
-            episode_end_indices[i] = episode_end
-
-            if step == 0:
-                episode_start = 0
-            else:
-                past_terminated_rel = torch.where(end_mask[:step, env])[0]
-                if past_terminated_rel.numel() > 0:
-                    episode_start = int(past_terminated_rel[-1].item()) + 1
-                else:
-                    episode_start = 0
-            episode_start_indices[i] = episode_start
-
-        strategy_indices: dict[str, torch.Tensor] = {}
-
-        if "future" in strategies:
-            future_step_indices = step_indices.clone()
-            for i in range(batch_size):
-                step = int(step_indices[i].item())
-                episode_end = int(episode_end_indices[i].item())
-                future_step_indices[i] = min(step + future_steps, episode_end)
-            strategy_indices["future"] = future_step_indices * self.num_envs + env_indices
-
-        if "final" in strategies:
-            strategy_indices["final"] = episode_end_indices * self.num_envs + env_indices
-
-        if "episode" in strategies:
-            episode_step_indices = step_indices.clone()
-            for i in range(batch_size):
-                episode_start = int(episode_start_indices[i].item())
-                episode_end = int(episode_end_indices[i].item())
-                episode_step_indices[i] = torch.randint(
-                    episode_start, episode_end + 1, (1,), device=self.device
-                )[0]
-            strategy_indices["episode"] = episode_step_indices * self.num_envs + env_indices
-
-        if "random" in strategies:
-            strategy_indices["random"] = torch.randint(0, total, (batch_size,), device=self.device)
-
-        for key in key_names:
-            data = self.data[key]
-            shape = data.shape[2:]
-            flat = data[:self.current_size].reshape(total, *shape)
-            for strategy, strategy_idx in strategy_indices.items():
-                suffix = "_future" if strategy == "future" else f"_{strategy}"
-                batch[f"{key}{suffix}"] = flat[strategy_idx]
-        return batch
-        
     def sample_tensor(self, key_name:str, batch_size: int) -> torch.Tensor:
         data = self.data[key_name]
         total = self.current_size * self.num_envs
@@ -344,13 +125,15 @@ class ReplayBuffer:
                 f"state_keys must not overlap key_names, got overlapping keys: {sorted(overlap)}."
             )
 
+        # Chunks follow time order, so a sequence never jumps across the write pointer.
+        order = self.time_order()
         chunk_index: list[tuple[int, int]] = []
         for env_idx in range(self.num_envs):
             for start in range(0, self.current_size, seq_len):
                 chunk_index.append((env_idx, start))
         if shuffle:
-            order = torch.randperm(len(chunk_index), device=self.device).tolist()
-            chunk_index = [chunk_index[i] for i in order]
+            permutation = torch.randperm(len(chunk_index), device=self.device).tolist()
+            chunk_index = [chunk_index[i] for i in permutation]
 
         for batch_start in range(0, len(chunk_index), batch_size):
             chunk_batch = chunk_index[batch_start : batch_start + batch_size]
@@ -365,19 +148,19 @@ class ReplayBuffer:
             valid_mask = torch.zeros((seq_len, batch_count), dtype=torch.bool, device=self.device)
 
             for i, (env_idx, start) in enumerate(chunk_batch):
-                end = min(start + seq_len, self.current_size)
-                valid_steps = end - start
+                slots = order[start : start + seq_len]
+                valid_steps = slots.shape[0]
                 valid_mask[:valid_steps, i] = True
 
                 for key in key_names:
-                    batch[key][:valid_steps, i] = self.data[key][start:end, env_idx]
+                    batch[key][:valid_steps, i] = self.data[key][slots, env_idx]
 
             for key in state_keys:
                 data = self.data[key]
                 state_shape = (batch_count, *data.shape[2:])
                 init_states = torch.zeros(state_shape, dtype=data.dtype, device=self.device)
                 for i, (env_idx, start) in enumerate(chunk_batch):
-                    init_states[i] = data[start, env_idx]
+                    init_states[i] = data[order[start], env_idx]
                 batch[f"{key}_init"] = init_states
 
             batch["valid_mask"] = valid_mask
@@ -385,25 +168,29 @@ class ReplayBuffer:
 
     # ---------------- SAVE & LOAD ---------------- #
 
-    def save(self, path: str) -> None:
-        """Save replay buffer to a file."""
-        save_dict = {
+    def state_dict(self) -> dict[str, Any]:
+        return {
             "num_envs": self.num_envs,
             "steps": self.steps,
             "step": self.step,
             "current_size": self.current_size,
             "data": {k: v.cpu() for k, v in self.data.items()},
         }
-        torch.save(save_dict, path)
+
+    def load_state_dict(self, state: dict[str, Any], device: torch.device | None = None) -> None:
+        self.device = device or self.device
+        self.num_envs = state["num_envs"]
+        self.steps = state["steps"]
+        self.step = state["step"]
+        self.current_size = state["current_size"]
+        self.data = {k: v.to(self.device) for k, v in state["data"].items()}
+
+    def save(self, path: str) -> None:
+        """Save replay buffer to a file."""
+        torch.save(self.state_dict(), path)
         print(f"[ReplayBuffer] Saved buffer to '{path}'")
 
     def load(self, path: str, device: torch.device | None = None) -> None:
         """Load replay buffer from a file."""
-        checkpoint = torch.load(path, map_location=device or self.device)
-        self.num_envs = checkpoint["num_envs"]
-        self.steps = checkpoint["steps"]
-        self.step = checkpoint["step"]
-        self.current_size = checkpoint["current_size"]
-        self.data = {k: v.to(device or self.device) for k, v in checkpoint["data"].items()}
-        self.device = device or self.device
+        self.load_state_dict(torch.load(path, map_location=device or self.device), device)
         print(f"[ReplayBuffer] Loaded buffer from '{path}' to device '{self.device}'")

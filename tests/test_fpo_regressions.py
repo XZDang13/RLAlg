@@ -27,9 +27,10 @@ def inputs():
 def test_default_ratio_averages_monte_carlo_losses_before_exponentiation():
     actor = ConstantVelocity()
     obs, actions, eps, t = inputs()
-    old = FPO.compute_cmf_loss(actor, obs, actions, eps, t).detach()
+    old = FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t).detach()
     old += torch.tensor([[-0.2, 0.2], [-0.1, 0.1]])
-    result = FPO.compute_policy_loss(actor, obs, actions, eps, t, old, torch.ones(2), 0.2)
+    result = FPO.compute_policy_loss(
+        actor, observations=obs, actions=actions, eps=eps, t=t, init_cmf_loss=old, advantages=torch.ones(2), clip_ratio=0.2)
     assert result['ratio'].item() == pytest.approx(1.0)
     assert result['clip_fraction'].item() == pytest.approx(0.0)
 
@@ -40,7 +41,7 @@ def test_log_ratio_guard_applies_in_both_aggregation_modes(average):
     obs, actions, eps, t = inputs()
     old = torch.full((2, 2), 1000.0)
     result = FPO.compute_policy_loss(
-        actor, obs, actions, eps, t, old, -torch.ones(2), 0.2,
+        actor, observations=obs, actions=actions, eps=eps, t=t, init_cmf_loss=old, advantages=-torch.ones(2), clip_ratio=0.2,
         average_losses_before_exp=average, ratio_clip_range=(-3, 3),
     )
     assert all(torch.isfinite(value) for value in result.values())
@@ -54,10 +55,12 @@ def test_rollout_loss_and_advantages_are_frozen_during_updates():
     obs, actions, eps, t = inputs()
     # Deliberately leave the old loss attached to a graph: policy updates must
     # still only differentiate the recomputed current loss.
-    old = FPO.compute_cmf_loss(actor, obs, actions, eps, t)
+    old = FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t)
     old.retain_grad()
     advantages = torch.ones(2, requires_grad=True)
-    result = FPO.compute_policy_loss(actor, obs, actions, eps, t, old, advantages, 0.2)
+    result = FPO.compute_policy_loss(
+        actor, observations=obs, actions=actions, eps=eps, t=t, init_cmf_loss=old, advantages=advantages, clip_ratio=0.2,
+    )
     result['loss'].backward()
     assert actor.value.grad.abs().item() > 0
     assert old.grad is None
@@ -67,8 +70,8 @@ def test_rollout_loss_and_advantages_are_frozen_during_updates():
 def test_default_sampling_is_reproducible_given_the_initial_noise():
     actor = ConstantVelocity()
     obs, noise = torch.zeros(3, 1), torch.zeros(3, 1)
-    first = FPO.sample_actions(actor, obs, noise, 4)
-    second = FPO.sample_actions(actor, obs, noise, 4)
+    first = FPO.sample_actions(actor, observations=obs, init_noise=noise, flow_steps=4)
+    second = FPO.sample_actions(actor, observations=obs, init_noise=noise, flow_steps=4)
     assert torch.equal(first.action, second.action)
     assert torch.equal(first.action, first.action_path[..., -1, :])
 
@@ -82,9 +85,9 @@ def test_consistent_velocity_moves_noise_to_an_oracle_action(target):
     action = torch.ones(2, 1)
     eps = torch.full((2, 4, 1), 3.0)
     t = torch.linspace(0, 1, 4).view(1, 4, 1).expand(2, 4, 1)
-    loss = FPO.compute_cmf_loss(actor, obs, action, eps, t, supervise_target=target)
+    loss = FPO.compute_cmf_loss(actor, observations=obs, actions=action, eps=eps, t=t, supervise_target=target)
     assert torch.allclose(loss, torch.zeros_like(loss), atol=1e-7)
-    step = FPO.sample_actions(actor, obs, eps[:, 0], 4)
+    step = FPO.sample_actions(actor, observations=obs, init_noise=eps[:, 0], flow_steps=4)
     assert torch.allclose(step.action, action)
 
 
@@ -93,9 +96,10 @@ def test_positive_and_negative_advantages_reverse_the_update_direction(target):
     obs, actions, eps, t = inputs()
     for advantage, sign in ((1.0, -1), (-1.0, 1)):
         actor = ConstantVelocity(0.1)
-        old = FPO.compute_cmf_loss(actor, obs, actions, eps, t, supervise_target=target).detach()
+        old = FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t, supervise_target=target).detach()
         result = FPO.compute_policy_loss(
-            actor, obs, actions, eps, t, old, torch.full((2,), advantage), 0.2,
+            actor, observations=obs, actions=actions, eps=eps, t=t, init_cmf_loss=old,
+            advantages=torch.full((2,), advantage), clip_ratio=0.2,
             supervise_target=target,
         )
         result['loss'].backward()
@@ -113,9 +117,64 @@ def test_invalid_cmf_inputs_fail_before_producing_nan(problem):
     elif problem == 'invalid_time':
         t[0, 0] = 1.1
     else:
-        old = FPO.compute_cmf_loss(actor, obs, actions, eps, t).detach()
+        old = FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t).detach()
         with pytest.raises(ValueError):
-            FPO.compute_policy_loss(actor, obs, actions, eps, t, old, torch.ones(2), 0.2, ratio_clip_range=(3, -3))
+            FPO.compute_policy_loss(
+                actor, observations=obs, actions=actions, eps=eps, t=t, init_cmf_loss=old,
+                advantages=torch.ones(2), clip_ratio=0.2, ratio_clip_range=(3, -3),
+            )
         return
     with pytest.raises(ValueError):
+        FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t)
+
+
+def test_data_arguments_are_keyword_only():
+    actor = ConstantVelocity()
+    obs, actions, eps, t = inputs()
+    old = FPO.compute_cmf_loss(actor, observations=obs, actions=actions, eps=eps, t=t).detach()
+    with pytest.raises(TypeError):
         FPO.compute_cmf_loss(actor, obs, actions, eps, t)
+    with pytest.raises(TypeError):
+        FPO.compute_policy_loss(actor, obs, actions, eps, t, old, torch.ones(2), 0.2)
+    with pytest.raises(TypeError):
+        FPO.sample_actions(actor, obs, eps[:, 0], 4)
+    with pytest.raises(TypeError):
+        FPO.sample_actions_with_cmf_info(actor, obs, eps[:, 0], 4)
+
+
+class LinearValue(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor([0.5, -1.0]))
+
+    def forward(self, obs):
+        return ValueStep(obs @ self.weight)
+
+
+def test_value_losses_match_ppo_half_mse_convention():
+    from RLAlg.alg.ppo import PPO
+
+    critic = LinearValue()
+    obs = torch.tensor([[1.0, 2.0], [0.0, 1.0], [3.0, -1.0]])
+    values_hat = torch.tensor([-1.0, -0.5, 2.0])
+    returns = torch.tensor([0.0, 1.0, 1.0])
+    value = FPO.compute_value_loss(critic, observations=obs, returns=returns)
+    clipped = FPO.compute_clipped_value_loss(
+        critic, observations=obs, values_hat=values_hat, returns=returns, clip_ratio=0.2,
+    )
+    torch.testing.assert_close(value["loss"], 0.5 * ((obs @ critic.weight - returns) ** 2).mean())
+    torch.testing.assert_close(value["loss"], PPO.compute_value_loss(critic, observations=obs, returns=returns)["loss"])
+    torch.testing.assert_close(
+        clipped["loss"],
+        PPO.compute_clipped_value_loss(
+            critic, observations=obs, values_hat=values_hat, returns=returns, clip_ratio=0.2,
+        )["loss"],
+    )
+    with pytest.raises(TypeError):
+        FPO.compute_value_loss(critic, obs, returns)
+    with pytest.raises(ValueError, match="same shape"):
+        FPO.compute_value_loss(critic, observations=obs, returns=returns[:, None])
+    with pytest.raises(ValueError, match="same shape"):
+        FPO.compute_clipped_value_loss(
+            critic, observations=obs, values_hat=values_hat[:, None], returns=returns, clip_ratio=0.2,
+        )
