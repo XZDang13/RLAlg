@@ -34,6 +34,7 @@ Gymnasium、MuJoCo 等环境依赖由训练项目管理，核心库无需安装�
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | 流动作采样、CMF 损失、裁剪流策略优化 |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | 离线 expectile 价值回归和优势加权策略拟合 |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | 通过可微仿真器的短视界解析策略梯度、TD(λ) 价值目标 |
+| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | 带接触约束自适应视界的 SHAC、双 critic、训练 critic 至收敛 |
 
 所有损失函数采用同一套调用约定：
 
@@ -295,6 +296,79 @@ assert targets.shape == (H, N)
 或者用目标 critic 计算 `next_values`，并用 `SHAC.update_target_param` 更新它。
 若要在 rollout 之间截断梯度，请在下一次 rollout 开始前 detach 仿真器状态。
 
+## Adaptive Horizon Actor-Critic
+
+AHAC（[Georgiev 等，2024](https://arxiv.org/abs/2405.17784)）基于 SHAC，
+使用相同的 rollout 张量和 TD(λ) 目标，并做了三处改动：
+在 actor 目标中加入接触约束，用其拉格朗日乘子自适应调整视界 `H`；
+用双 critic `min(V1, V2)` 取代目标 critic；训练 critic 直到损失不再变化。
+仿真器需要在每一步给出归一化的接触力范数 `contact_norms[t, n]`；
+论文按状态维度将接触力除以 `max(q̈, 1)`。
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.ahac import AHAC
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = nn.Linear(3, 3), DoubleCritic()
+critic_optimizer = torch.optim.Adam(critic.parameters(), lr=2e-3)
+N, gamma, H_max, C = 4, 0.99, 64, 500.0
+horizon, dual = 32.0, torch.zeros(H_max)  # kept across iterations
+
+H = int(horizon)
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, rewards, next_values, contact_norms = [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    action = torch.tanh(policy(state))
+    state = state + 0.1 * action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    contact_norms.append(1000.0 * action.abs().sum(-1))  # normalized contact force norm from the simulator
+    next_values.append(AHAC.compute_next_values(critic, state))
+rewards, next_values = torch.stack(rewards), torch.stack(next_values)
+contact_norms = torch.stack(contact_norms)
+
+policy_result = AHAC.compute_policy_loss(
+    rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma,
+    contact_norms=contact_norms, dual=dual, contact_threshold=C,
+)
+policy_result["loss"].backward()  # then step only the policy optimizer
+dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=C, lr=1e-5)
+horizon = AHAC.update_horizon(horizon, dual=dual, lr=1e-5, min_horizon=4.0)
+
+targets = AHAC.compute_td_lambda_targets(
+    rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma, lambda_=0.95,
+)
+losses = []
+while len(losses) < 64 and not AHAC.critic_converged(losses):
+    value_result = AHAC.compute_value_loss(
+        critic, observations=torch.stack(observations), targets=targets,
+    )  # use mini-batches of (observations, targets) in practice
+    critic_optimizer.zero_grad(set_to_none=True)
+    value_result["loss"].backward()
+    critic_optimizer.step()
+    losses.append(value_result["loss"].item())
+```
+
+策略损失为 `-(J + sum_h phi_h (C - contact_norms_h)) / (H * N)`，其中 `J` 是 SHAC 回报。
+不传 `contact_norms` 和 `dual` 时与 SHAC 损失相同。
+`update_dual` 在平均接触范数超过 `C` 的步上增大 `phi_h`，其余步上减小。
+`update_horizon` 执行 `H <- H - lr * sum(phi[:H])`，并裁剪到 `[min_horizon, len(dual)]`。
+论文算法 1 中写的是 `+`；本库使用 `-`，使刚性接触缩短 rollout。
+乘子不会被截断为非负值，因此视界还能重新变长。
+论文中 `C = 500`，两个更新的 `lr = 1e-5`（Hopper 为 `2e-4`），critic 最多训练 64 次。
+`critic_converged` 对最近 `window` 次迭代的损失变化取绝对值求和，再与 `tolerance` 比较。
+
 ## Flow Policy Optimization
 
 FPO 约定 `t=0` 为动作、`t=1` 为高斯噪声。网络预测速度
@@ -391,7 +465,7 @@ python -m pytest -q
 ```
 
 测试覆盖算法损失、形状检查、终止掩码、循环网络、replay/HER、归一化、日志，
-FPO 的采样和梯度，以及 SHAC 在可微玩具 rollout 上的梯度。
+FPO 的采样和梯度，以及 SHAC/AHAC 在可微玩具 rollout 上的梯度。
 
 ## 许可证
 

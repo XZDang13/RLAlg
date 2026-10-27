@@ -38,6 +38,7 @@ Import algorithm classes from their modules, for example
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | Flow action sampling, CMF losses, clipped flow policy optimization |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | Offline expectile value regression and advantage-weighted policy fitting |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | Short-horizon analytic policy gradients through a differentiable simulator, TD(λ) value targets |
+| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | SHAC with a contact-constrained adaptive horizon, double critic, and critic training until convergence |
 
 All loss functions share one calling convention:
 
@@ -310,6 +311,82 @@ gradients before its update, or compute `next_values` with a target critic that
 `SHAC.update_target_param` keeps up to date. To cut gradients between
 rollouts, detach the simulator state before the next rollout starts.
 
+## Adaptive Horizon Actor-Critic
+
+AHAC ([Georgiev et al., 2024](https://arxiv.org/abs/2405.17784)) builds on
+SHAC with the same rollout tensors and TD(λ) targets, and changes three things.
+It adds a contact constraint to the actor objective whose Lagrange multipliers
+adapt the horizon `H`. It uses a double critic, `min(V1, V2)`, in place of the
+target critic. It trains the critic until its loss stops changing. The
+simulator must report a normalized contact-force norm `contact_norms[t, n]`
+per step; the paper divides contact forces by `max(q̈, 1)` per state dimension.
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.ahac import AHAC
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = nn.Linear(3, 3), DoubleCritic()
+critic_optimizer = torch.optim.Adam(critic.parameters(), lr=2e-3)
+N, gamma, H_max, C = 4, 0.99, 64, 500.0
+horizon, dual = 32.0, torch.zeros(H_max)  # kept across iterations
+
+H = int(horizon)
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, rewards, next_values, contact_norms = [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    action = torch.tanh(policy(state))
+    state = state + 0.1 * action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    contact_norms.append(1000.0 * action.abs().sum(-1))  # normalized contact force norm from the simulator
+    next_values.append(AHAC.compute_next_values(critic, state))
+rewards, next_values = torch.stack(rewards), torch.stack(next_values)
+contact_norms = torch.stack(contact_norms)
+
+policy_result = AHAC.compute_policy_loss(
+    rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma,
+    contact_norms=contact_norms, dual=dual, contact_threshold=C,
+)
+policy_result["loss"].backward()  # then step only the policy optimizer
+dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=C, lr=1e-5)
+horizon = AHAC.update_horizon(horizon, dual=dual, lr=1e-5, min_horizon=4.0)
+
+targets = AHAC.compute_td_lambda_targets(
+    rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma, lambda_=0.95,
+)
+losses = []
+while len(losses) < 64 and not AHAC.critic_converged(losses):
+    value_result = AHAC.compute_value_loss(
+        critic, observations=torch.stack(observations), targets=targets,
+    )  # use mini-batches of (observations, targets) in practice
+    critic_optimizer.zero_grad(set_to_none=True)
+    value_result["loss"].backward()
+    critic_optimizer.step()
+    losses.append(value_result["loss"].item())
+```
+
+The policy loss is `-(J + sum_h phi_h (C - contact_norms_h)) / (H * N)`, where
+`J` is the SHAC return. Without `contact_norms` and `dual` it equals the SHAC
+loss. `update_dual` raises `phi_h` at steps whose mean contact norm exceeds `C`
+and lowers it elsewhere. `update_horizon` applies `H <- H - lr * sum(phi[:H])`,
+clipped to `[min_horizon, len(dual)]`. Algorithm 1 in the paper prints `+`;
+this library uses `-` so that stiff contact shortens rollouts. Multipliers are
+not clipped at zero, so the horizon can grow again. The paper uses
+`C = 500`, `lr = 1e-5` (`2e-4` for Hopper) for both updates, and at most 64
+critic iterations. `critic_converged` sums the absolute loss changes over the
+last `window` iterations and compares them with `tolerance`.
+
 ## Flow Policy Optimization
 
 FPO uses `t=0` for actions and `t=1` for Gaussian noise. The network predicts
@@ -413,7 +490,7 @@ python -m pytest -q
 
 Tests cover algorithm losses, shape checks, termination masks, recurrent
 networks, replay/HER, normalization, logging, FPO sampling and gradients, and
-SHAC gradients through a differentiable toy rollout.
+SHAC/AHAC gradients through a differentiable toy rollout.
 
 ## License
 
