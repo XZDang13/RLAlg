@@ -1,3 +1,6 @@
+from collections import deque
+
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -7,89 +10,96 @@ from RLAlg.alg.shac import SHAC
 from RLAlg.nn.steps import ValueStep
 
 
-def _random_rollout(horizon=6, num_envs=5, seed=0):
-    generator = torch.Generator().manual_seed(seed)
-    rewards = torch.randn(horizon, num_envs, generator=generator, dtype=torch.float64)
-    next_values = torch.randn(horizon, num_envs, generator=generator, dtype=torch.float64)
-    terminated = torch.rand(horizon, num_envs, generator=generator) < 0.2
-    truncated = (torch.rand(horizon, num_envs, generator=generator) < 0.2) & ~terminated
-    contact_norms = 1000.0 * torch.rand(horizon, num_envs, generator=generator, dtype=torch.float64)
-    return rewards, next_values, terminated, truncated, contact_norms
+def _reference_contact_norms(contact_forces, accelerations):
+    # Port of the contact normalization in the reference AHAC compute_actor_loss.
+    acc = accelerations.clone()
+    acc[acc >= 0] = torch.maximum(acc[acc >= 0], torch.ones_like(acc[acc >= 0]))
+    acc[acc < 0] = torch.maximum(acc[acc < 0], torch.ones_like(acc[acc < 0]))
+    return torch.norm(contact_forces / acc, dim=(1, 2))
 
 
-def test_policy_loss_without_constraint_matches_shac():
-    rewards, next_values, terminated, truncated, _ = _random_rollout()
-    kwargs = dict(rewards=rewards, next_values=next_values, terminated=terminated, gamma=0.97, truncated=truncated)
+def _reference_horizon_update(H, lambd, cfs, C, lambd_lr, steps_min, steps_max):
+    # Port of the "Train horizon" step and init_buffers in the reference AHAC train loop.
+    lambd = lambd - lambd_lr * (C - cfs.mean(-1))
+    H = H + lambd_lr * lambd.sum()
+    H = torch.clip(H, steps_min, steps_max)
+    return H, lambd[0].repeat(round(H.item()))
 
-    torch.testing.assert_close(AHAC.compute_policy_loss(**kwargs)["loss"], SHAC.compute_policy_loss(**kwargs)["loss"])
+
+def _reference_critic_stop(epoch_losses):
+    # Port of the early-stopping loop in the reference AHAC train loop.
+    last_losses = deque(maxlen=5)
+    for j, loss in enumerate(epoch_losses):
+        if len(last_losses) == 5 and abs(np.diff(last_losses).mean()) < 2e-1:
+            return j + 1
+        last_losses.append(loss)
+    return len(epoch_losses)
 
 
-def test_policy_loss_adds_lagrangian_constraint_term():
-    rewards, next_values, terminated, truncated, contact_norms = _random_rollout()
-    horizon, num_envs = rewards.shape
-    dual = torch.linspace(-1.0, 2.0, horizon + 3, dtype=torch.float64)
+def _ahac_critic_stop(epoch_losses):
+    losses = []
+    for j, loss in enumerate(epoch_losses):
+        if AHAC.critic_converged(losses):
+            return j + 1
+        losses.append(loss)
+    return len(epoch_losses)
 
-    result = AHAC.compute_policy_loss(
-        rewards=rewards, next_values=next_values, terminated=terminated, gamma=0.97, truncated=truncated,
-        contact_norms=contact_norms, dual=dual, contact_threshold=500.0,
+
+def test_contact_norms_match_reference():
+    generator = torch.Generator().manual_seed(0)
+    contact_forces = 100.0 * torch.randn(5, 4, 3, generator=generator)
+    accelerations = 3.0 * torch.randn(5, 4, 3, generator=generator)
+
+    norms = AHAC.compute_contact_norms(contact_forces, accelerations)
+
+    torch.testing.assert_close(norms, _reference_contact_norms(contact_forces, accelerations))
+    assert norms.shape == (5,)
+
+
+@pytest.mark.parametrize("contact_scale", [100.0, 900.0])
+def test_horizon_update_matches_reference_over_iterations(contact_scale):
+    generator = torch.Generator().manual_seed(1)
+    horizon, dual = 8.0, torch.zeros(8)
+    ref_H, ref_lambd = torch.tensor(8.0), torch.zeros(8)
+    for _ in range(30):
+        contact_norms = contact_scale * torch.rand(dual.shape[0], 6, generator=generator)
+        horizon, dual = AHAC.update_horizon(
+            horizon, dual=dual, contact_norms=contact_norms, contact_threshold=500.0, lr=5e-4,
+            min_horizon=8.0, max_horizon=64.0,
+        )
+        ref_H, ref_lambd = _reference_horizon_update(ref_H, ref_lambd, contact_norms, 500.0, 5e-4, 8, 64)
+
+        assert horizon == pytest.approx(ref_H.item(), rel=1e-5)
+        torch.testing.assert_close(dual, ref_lambd)
+
+
+def test_horizon_grows_under_stiff_contact_and_shrinks_otherwise():
+    # Positive multipliers lengthen the horizon, as in the reference and Algorithm 1.
+    stiff = torch.full((16, 4), 900.0)
+    soft = torch.full((16, 4), 100.0)
+    kwargs = dict(contact_threshold=500.0, lr=1e-2, min_horizon=8.0, max_horizon=64.0)
+
+    longer, dual = AHAC.update_horizon(16.0, dual=torch.zeros(16), contact_norms=stiff, **kwargs)
+    shorter, _ = AHAC.update_horizon(16.0, dual=torch.zeros(16), contact_norms=soft, **kwargs)
+
+    assert longer == pytest.approx(16.0 + 1e-2 * 16 * 4.0)
+    assert shorter == pytest.approx(16.0 - 1e-2 * 16 * 4.0)
+    assert dual.shape == (round(longer),)
+    torch.testing.assert_close(dual, torch.full((round(longer),), 4.0))
+
+
+def test_horizon_update_clips_and_does_not_modify_inputs():
+    dual = torch.zeros(8)
+    contact_norms = torch.full((8, 2), 1e6)
+
+    horizon, new_dual = AHAC.update_horizon(
+        8.0, dual=dual, contact_norms=contact_norms, contact_threshold=500.0, lr=1.0,
+        min_horizon=8.0, max_horizon=64.0,
     )
-    shac_loss = SHAC.compute_policy_loss(
-        rewards=rewards, next_values=next_values, terminated=terminated, gamma=0.97, truncated=truncated
-    )["loss"]
-    constraint = sum(
-        dual[h] * (500.0 - contact_norms[h, n]) for h in range(horizon) for n in range(num_envs)
-    ) / (horizon * num_envs)
 
-    torch.testing.assert_close(result["loss"], shac_loss - constraint)
-    torch.testing.assert_close(result["constraint_violation"], (contact_norms > 500.0).float().mean())
-
-
-def test_policy_loss_backpropagates_through_contact_norms_but_not_dual():
-    rewards, next_values, terminated, _, contact_norms = _random_rollout(horizon=3, num_envs=2)
-    contact_norms.requires_grad_(True)
-    dual = torch.tensor([1.0, 0.0, -2.0], dtype=torch.float64, requires_grad=True)
-
-    AHAC.compute_policy_loss(
-        rewards=rewards, next_values=next_values, terminated=terminated, gamma=0.9,
-        contact_norms=contact_norms, dual=dual,
-    )["loss"].backward()
-
-    # d(-sum phi (C - c)) / (H N) / dc = phi / (H N)
-    expected = (dual.detach() / 6.0).unsqueeze(-1).expand(3, 2)
-    torch.testing.assert_close(contact_norms.grad, expected)
-    assert dual.grad is None
-
-
-def test_update_dual_moves_against_slack_and_keeps_tail():
-    contact_norms = torch.tensor([[600.0, 800.0], [100.0, 300.0]])
-    dual = torch.tensor([0.0, 0.0, 5.0])
-
-    new_dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=500.0, lr=0.01)
-
-    torch.testing.assert_close(new_dual, torch.tensor([2.0, -3.0, 5.0]))
-    torch.testing.assert_close(dual, torch.tensor([0.0, 0.0, 5.0]))
-
-
-def test_update_horizon_shrinks_on_violation_and_grows_when_satisfied():
-    violated = torch.full((32,), 2.0)
-    satisfied = torch.full((32,), -2.0)
-
-    assert AHAC.update_horizon(20.5, dual=violated, lr=0.1) == pytest.approx(20.5 - 0.1 * 2.0 * 20)
-    assert AHAC.update_horizon(20.5, dual=satisfied, lr=0.1) == pytest.approx(20.5 + 0.1 * 2.0 * 20)
-    assert AHAC.update_horizon(20.0, dual=violated, lr=10.0, min_horizon=4.0) == 4.0
-    assert AHAC.update_horizon(30.0, dual=satisfied, lr=10.0) == 32.0
-
-
-def test_dual_and_horizon_drive_horizon_down_under_stiff_contact():
-    dual = torch.zeros(16)
-    horizon = 16.0
-    for _ in range(50):
-        h = int(horizon)
-        contact_norms = torch.full((h, 4), 900.0)
-        dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=500.0, lr=1e-3)
-        horizon = AHAC.update_horizon(horizon, dual=dual, lr=1e-2, min_horizon=2.0)
-
-    assert horizon < 16.0
+    assert horizon == 64.0
+    assert new_dual.shape == (64,)
+    torch.testing.assert_close(dual, torch.zeros(8))
 
 
 class DoubleCritic(nn.Module):
@@ -113,83 +123,57 @@ def test_next_values_take_minimum_with_graph():
     torch.testing.assert_close(critic.values2.grad, torch.tensor([0.0, 1.0]))
 
 
-def test_value_loss_sums_half_mse_over_both_critics():
+def test_value_loss_equals_reference_mean_over_both_critics():
     critic = DoubleCritic(torch.tensor([1.0, 2.0]), torch.tensor([0.0, 0.0]))
     targets = torch.tensor([0.0, 4.0], requires_grad=True)
 
     result = AHAC.compute_value_loss(critic, observations=torch.zeros(2, 3), targets=targets)
     result["loss"].backward()
 
-    torch.testing.assert_close(result["loss"], torch.tensor(1.25 + 4.0))
+    predicted = torch.stack([critic.values1, critic.values2], dim=-1).detach()
+    reference = ((predicted - targets.detach().unsqueeze(-1)) ** 2).mean()
+    torch.testing.assert_close(result["loss"], reference)
     assert targets.grad is None
     torch.testing.assert_close(critic.values2.grad, torch.tensor([0.0, -2.0]))
 
 
+@pytest.mark.parametrize(
+    "epoch_losses",
+    [
+        [10.0, 8.0, 6.0, 4.0, 2.0, 1.9, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8],
+        [5.0, 5.1, 5.0, 5.1, 5.0, 5.1, 5.0],
+        list(np.linspace(100.0, 0.0, 64)),
+    ],
+)
+def test_critic_early_stop_matches_reference(epoch_losses):
+    assert _ahac_critic_stop(epoch_losses) == _reference_critic_stop(epoch_losses)
+
+
 def test_critic_converged():
-    assert not AHAC.critic_converged([1.0, 1.0, 1.0])
-    assert AHAC.critic_converged([5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-    assert not AHAC.critic_converged([1.0, 1.2, 1.0, 1.2, 1.0, 1.2])
-    assert AHAC.critic_converged([1.0, 0.9], window=1, tolerance=0.2)
+    assert not AHAC.critic_converged([1.0, 1.0, 1.0, 1.0])
+    assert AHAC.critic_converged([1.0, 1.1, 1.0, 1.1, 1.0])
+    assert not AHAC.critic_converged([5.0, 4.0, 3.0, 2.0, 1.0])
 
 
-def test_td_lambda_targets_are_inherited():
-    rewards, next_values, terminated, truncated, _ = _random_rollout(seed=2)
-    kwargs = dict(rewards=rewards, next_values=next_values, terminated=terminated, gamma=0.99, lambda_=0.95,
-                  truncated=truncated)
-
-    torch.testing.assert_close(AHAC.compute_td_lambda_targets(**kwargs), SHAC.compute_td_lambda_targets(**kwargs))
+def test_policy_loss_and_td_lambda_are_shac():
+    assert AHAC.compute_policy_loss is SHAC.compute_policy_loss
+    assert AHAC.compute_td_lambda_targets is SHAC.compute_td_lambda_targets
 
 
 def test_validation():
-    rewards = torch.zeros(3, 2)
-    terminated = torch.zeros(3, 2, dtype=torch.bool)
-    with pytest.raises(ValueError, match="together"):
-        AHAC.compute_policy_loss(
-            rewards=rewards, next_values=rewards, terminated=terminated, gamma=0.99, contact_norms=rewards
-        )
-    with pytest.raises(ValueError, match="H_max"):
-        AHAC.compute_policy_loss(
-            rewards=rewards, next_values=rewards, terminated=terminated, gamma=0.99,
-            contact_norms=rewards, dual=torch.zeros(2),
+    kwargs = dict(contact_threshold=500.0, lr=0.1, min_horizon=8.0, max_horizon=64.0)
+    with pytest.raises(ValueError, match=r"\[H, N\]"):
+        AHAC.update_horizon(8.0, dual=torch.zeros(8), contact_norms=torch.zeros(8), **kwargs)
+    with pytest.raises(ValueError, match="dual"):
+        AHAC.update_horizon(8.0, dual=torch.zeros(7), contact_norms=torch.zeros(8, 2), **kwargs)
+    with pytest.raises(ValueError, match="min_horizon"):
+        AHAC.update_horizon(
+            8.0, dual=torch.zeros(8), contact_norms=torch.zeros(8, 2), contact_threshold=500.0, lr=0.1,
+            min_horizon=10.0, max_horizon=5.0,
         )
     with pytest.raises(ValueError, match="same shape"):
-        AHAC.compute_policy_loss(
-            rewards=rewards, next_values=rewards, terminated=terminated, gamma=0.99,
-            contact_norms=torch.zeros(3, 1), dual=torch.zeros(3),
-        )
-    with pytest.raises(ValueError, match=r"\[H, N\]"):
-        AHAC.update_dual(torch.zeros(3), contact_norms=torch.zeros(3), contact_threshold=500.0, lr=0.1)
-    with pytest.raises(ValueError, match="min_horizon"):
-        AHAC.update_horizon(5.0, dual=torch.zeros(8), lr=0.1, min_horizon=10.0)
+        AHAC.compute_contact_norms(torch.zeros(2, 3), torch.zeros(2, 4))
+    with pytest.raises(ValueError, match="window"):
+        AHAC.critic_converged([1.0], window=1)
     with pytest.raises(TypeError):
-        AHAC.update_dual(torch.zeros(3), torch.zeros(3, 2), 500.0, 0.1)
-
-
-def test_policy_gradient_through_differentiable_rollout_improves_return():
-    gain = nn.Parameter(torch.tensor([-0.3], dtype=torch.float64))
-    critic = DoubleCritic(torch.zeros(3, dtype=torch.float64), torch.zeros(3, dtype=torch.float64))
-    initial_state = torch.tensor([[1.0], [-2.0], [0.5]], dtype=torch.float64)
-    optimizer = torch.optim.SGD([gain], lr=0.05)
-    dual = torch.full((4,), 0.1, dtype=torch.float64)
-
-    def rollout_loss():
-        state, rewards, contacts = initial_state, [], []
-        for _ in range(4):
-            action = gain * state
-            state = state + action
-            rewards.append(-(state.squeeze(-1) ** 2) - 0.1 * action.squeeze(-1) ** 2)
-            contacts.append(action.squeeze(-1) ** 2)
-        rewards, contacts = torch.stack(rewards), torch.stack(contacts)
-        next_values = torch.stack([AHAC.compute_next_values(critic, None)] * 4)
-        return AHAC.compute_policy_loss(
-            rewards=rewards, next_values=next_values, terminated=torch.zeros_like(rewards, dtype=torch.bool),
-            gamma=0.95, contact_norms=contacts, dual=dual,
-        )["loss"]
-
-    initial_loss = rollout_loss().item()
-    for _ in range(20):
-        optimizer.zero_grad()
-        rollout_loss().backward()
-        optimizer.step()
-
-    assert rollout_loss().item() < initial_loss
+        AHAC.update_horizon(8.0, torch.zeros(8), torch.zeros(8, 2), 500.0, 0.1, 8.0, 64.0)

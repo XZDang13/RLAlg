@@ -34,7 +34,7 @@ Gymnasium、MuJoCo 等环境依赖由训练项目管理，核心库无需安装�
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | 流动作采样、CMF 损失、裁剪流策略优化 |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | 离线 expectile 价值回归和优势加权策略拟合 |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | 通过可微仿真器的短视界解析策略梯度、TD(λ) 价值目标 |
-| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | 带接触约束自适应视界的 SHAC、双 critic、训练 critic 至收敛 |
+| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | 按接触刚度自适应视界的 SHAC、双 critic、训练 critic 至收敛 |
 
 所有损失函数采用同一套调用约定：
 
@@ -298,12 +298,12 @@ assert targets.shape == (H, N)
 
 ## Adaptive Horizon Actor-Critic
 
-AHAC（[Georgiev 等，2024](https://arxiv.org/abs/2405.17784)）基于 SHAC，
-使用相同的 rollout 张量和 TD(λ) 目标，并做了三处改动：
-在 actor 目标中加入接触约束，用其拉格朗日乘子自适应调整视界 `H`；
+AHAC（[Georgiev 等，2024](https://arxiv.org/abs/2405.17784)；
+[参考代码](https://github.com/imgeorgiev/DiffRL)）基于 SHAC，
+复用其策略损失、rollout 张量和 TD(λ) 目标，并做了三处改动：
+用接触刚度约束的对偶变量自适应调整视界 `H`；
 用双 critic `min(V1, V2)` 取代目标 critic；训练 critic 直到损失不再变化。
-仿真器需要在每一步给出归一化的接触力范数 `contact_norms[t, n]`；
-论文按状态维度将接触力除以 `max(q̈, 1)`。
+仿真器需要在每一步给出接触力和加速度。
 
 ```python
 import torch
@@ -321,10 +321,10 @@ class DoubleCritic(nn.Module):
 
 policy, critic = nn.Linear(3, 3), DoubleCritic()
 critic_optimizer = torch.optim.Adam(critic.parameters(), lr=2e-3)
-N, gamma, H_max, C = 4, 0.99, 64, 500.0
-horizon, dual = 32.0, torch.zeros(H_max)  # kept across iterations
+N, gamma, C, H_min, H_max = 4, 0.99, 500.0, 8.0, 64.0
+horizon, dual = H_min, torch.zeros(round(H_min))  # kept across iterations
 
-H = int(horizon)
+H = len(dual)  # round(horizon)
 state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
 observations, rewards, next_values, contact_norms = [], [], [], []
 terminated = torch.zeros(H, N, dtype=torch.bool)
@@ -333,41 +333,47 @@ for t in range(H):
     action = torch.tanh(policy(state))
     state = state + 0.1 * action  # differentiable env.step
     rewards.append(-(state ** 2).sum(-1))
-    contact_norms.append(1000.0 * action.abs().sum(-1))  # normalized contact force norm from the simulator
-    next_values.append(AHAC.compute_next_values(critic, state))
+    contact_forces, accelerations = 1e3 * action.unsqueeze(-1), torch.randn(N, 3, 1)  # from the simulator
+    contact_norms.append(AHAC.compute_contact_norms(contact_forces, accelerations))
+    next_values.append(AHAC.compute_next_values(critic, state))  # final obs before reset when done
 rewards, next_values = torch.stack(rewards), torch.stack(next_values)
-contact_norms = torch.stack(contact_norms)
 
 policy_result = AHAC.compute_policy_loss(
     rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma,
-    contact_norms=contact_norms, dual=dual, contact_threshold=C,
 )
 policy_result["loss"].backward()  # then step only the policy optimizer
-dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=C, lr=1e-5)
-horizon = AHAC.update_horizon(horizon, dual=dual, lr=1e-5, min_horizon=4.0)
 
 targets = AHAC.compute_td_lambda_targets(
     rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma, lambda_=0.95,
 )
 losses = []
-while len(losses) < 64 and not AHAC.critic_converged(losses):
+for epoch in range(64):
     value_result = AHAC.compute_value_loss(
         critic, observations=torch.stack(observations), targets=targets,
-    )  # use mini-batches of (observations, targets) in practice
+    )  # average over mini-batches in practice
     critic_optimizer.zero_grad(set_to_none=True)
     value_result["loss"].backward()
     critic_optimizer.step()
+    if AHAC.critic_converged(losses):
+        break
     losses.append(value_result["loss"].item())
+
+horizon, dual = AHAC.update_horizon(
+    horizon, dual=dual, contact_norms=torch.stack(contact_norms), contact_threshold=C,
+    lr=5e-4, min_horizon=H_min, max_horizon=H_max,
+)
 ```
 
-策略损失为 `-(J + sum_h phi_h (C - contact_norms_h)) / (H * N)`，其中 `J` 是 SHAC 回报。
-不传 `contact_norms` 和 `dual` 时与 SHAC 损失相同。
-`update_dual` 在平均接触范数超过 `C` 的步上增大 `phi_h`，其余步上减小。
-`update_horizon` 执行 `H <- H - lr * sum(phi[:H])`，并裁剪到 `[min_horizon, len(dual)]`。
-论文算法 1 中写的是 `+`；本库使用 `-`，使刚性接触缩短 rollout。
-乘子不会被截断为非负值，因此视界还能重新变长。
-论文中 `C = 500`，两个更新的 `lr = 1e-5`（Hopper 为 `2e-4`），critic 最多训练 64 次。
-`critic_converged` 对最近 `window` 次迭代的损失变化取绝对值求和，再与 `tolerance` 比较。
+`compute_contact_norms` 对每个环境返回 `||contact_forces / max(accelerations, 1)||`。
+`update_horizon` 执行 `dual <- dual - lr * (C - mean_n contact_norms)` 和
+`H <- clip(H + lr * sum(dual), min_horizon, max_horizon)`，
+返回新视界和下一次 rollout 的乘子，即 `dual[0]` 重复 `round(H)` 次；
+下一次 rollout 运行 `len(dual)` 步。与参考代码和算法 1 一致，约束不在 actor 损失中加项，
+接触范数超过 `C` 时乘子变为正值并使视界变长。
+参考默认值为 `C = 500`，视界范围 `[8, 64]` 且从 8 开始，`lr = 5e-4` 线性衰减到 `1e-5`。
+`critic_converged` 在 `|mean(diff(最近 5 个 epoch 的损失))| < 0.2` 时停止训练 critic，
+判断发生在记录当前 epoch 损失之前，最多 64 个 epoch。
+`compute_value_loss` 对两个 critic 的 0.5 倍均方误差求和，等于参考实现中两个 critic 平方误差的平均。
 
 ## Flow Policy Optimization
 

@@ -38,7 +38,7 @@ Import algorithm classes from their modules, for example
 | `FPO` | [fpo.py](RLAlg/alg/fpo.py) | Flow action sampling, CMF losses, clipped flow policy optimization |
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | Offline expectile value regression and advantage-weighted policy fitting |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | Short-horizon analytic policy gradients through a differentiable simulator, TD(λ) value targets |
-| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | SHAC with a contact-constrained adaptive horizon, double critic, and critic training until convergence |
+| `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | SHAC with a contact-adapted horizon, double critic, and critic training until convergence |
 
 All loss functions share one calling convention:
 
@@ -313,13 +313,13 @@ rollouts, detach the simulator state before the next rollout starts.
 
 ## Adaptive Horizon Actor-Critic
 
-AHAC ([Georgiev et al., 2024](https://arxiv.org/abs/2405.17784)) builds on
-SHAC with the same rollout tensors and TD(λ) targets, and changes three things.
-It adds a contact constraint to the actor objective whose Lagrange multipliers
-adapt the horizon `H`. It uses a double critic, `min(V1, V2)`, in place of the
-target critic. It trains the critic until its loss stops changing. The
-simulator must report a normalized contact-force norm `contact_norms[t, n]`
-per step; the paper divides contact forces by `max(q̈, 1)` per state dimension.
+AHAC ([Georgiev et al., 2024](https://arxiv.org/abs/2405.17784);
+[reference code](https://github.com/imgeorgiev/DiffRL)) builds on SHAC and
+reuses its policy loss, rollout tensors, and TD(λ) targets. It changes three
+things. Dual variables on a contact-stiffness constraint adapt the horizon `H`.
+A double critic, `min(V1, V2)`, replaces the target critic. The critic trains
+until its loss stops changing. The simulator must report contact forces and
+accelerations at each step.
 
 ```python
 import torch
@@ -337,10 +337,10 @@ class DoubleCritic(nn.Module):
 
 policy, critic = nn.Linear(3, 3), DoubleCritic()
 critic_optimizer = torch.optim.Adam(critic.parameters(), lr=2e-3)
-N, gamma, H_max, C = 4, 0.99, 64, 500.0
-horizon, dual = 32.0, torch.zeros(H_max)  # kept across iterations
+N, gamma, C, H_min, H_max = 4, 0.99, 500.0, 8.0, 64.0
+horizon, dual = H_min, torch.zeros(round(H_min))  # kept across iterations
 
-H = int(horizon)
+H = len(dual)  # round(horizon)
 state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
 observations, rewards, next_values, contact_norms = [], [], [], []
 terminated = torch.zeros(H, N, dtype=torch.bool)
@@ -349,43 +349,49 @@ for t in range(H):
     action = torch.tanh(policy(state))
     state = state + 0.1 * action  # differentiable env.step
     rewards.append(-(state ** 2).sum(-1))
-    contact_norms.append(1000.0 * action.abs().sum(-1))  # normalized contact force norm from the simulator
-    next_values.append(AHAC.compute_next_values(critic, state))
+    contact_forces, accelerations = 1e3 * action.unsqueeze(-1), torch.randn(N, 3, 1)  # from the simulator
+    contact_norms.append(AHAC.compute_contact_norms(contact_forces, accelerations))
+    next_values.append(AHAC.compute_next_values(critic, state))  # final obs before reset when done
 rewards, next_values = torch.stack(rewards), torch.stack(next_values)
-contact_norms = torch.stack(contact_norms)
 
 policy_result = AHAC.compute_policy_loss(
     rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma,
-    contact_norms=contact_norms, dual=dual, contact_threshold=C,
 )
 policy_result["loss"].backward()  # then step only the policy optimizer
-dual = AHAC.update_dual(dual, contact_norms=contact_norms, contact_threshold=C, lr=1e-5)
-horizon = AHAC.update_horizon(horizon, dual=dual, lr=1e-5, min_horizon=4.0)
 
 targets = AHAC.compute_td_lambda_targets(
     rewards=rewards, next_values=next_values, terminated=terminated, gamma=gamma, lambda_=0.95,
 )
 losses = []
-while len(losses) < 64 and not AHAC.critic_converged(losses):
+for epoch in range(64):
     value_result = AHAC.compute_value_loss(
         critic, observations=torch.stack(observations), targets=targets,
-    )  # use mini-batches of (observations, targets) in practice
+    )  # average over mini-batches in practice
     critic_optimizer.zero_grad(set_to_none=True)
     value_result["loss"].backward()
     critic_optimizer.step()
+    if AHAC.critic_converged(losses):
+        break
     losses.append(value_result["loss"].item())
+
+horizon, dual = AHAC.update_horizon(
+    horizon, dual=dual, contact_norms=torch.stack(contact_norms), contact_threshold=C,
+    lr=5e-4, min_horizon=H_min, max_horizon=H_max,
+)
 ```
 
-The policy loss is `-(J + sum_h phi_h (C - contact_norms_h)) / (H * N)`, where
-`J` is the SHAC return. Without `contact_norms` and `dual` it equals the SHAC
-loss. `update_dual` raises `phi_h` at steps whose mean contact norm exceeds `C`
-and lowers it elsewhere. `update_horizon` applies `H <- H - lr * sum(phi[:H])`,
-clipped to `[min_horizon, len(dual)]`. Algorithm 1 in the paper prints `+`;
-this library uses `-` so that stiff contact shortens rollouts. Multipliers are
-not clipped at zero, so the horizon can grow again. The paper uses
-`C = 500`, `lr = 1e-5` (`2e-4` for Hopper) for both updates, and at most 64
-critic iterations. `critic_converged` sums the absolute loss changes over the
-last `window` iterations and compares them with `tolerance`.
+`compute_contact_norms` returns `||contact_forces / max(accelerations, 1)||` per
+environment. `update_horizon` applies `dual <- dual - lr * (C - mean_n contact_norms)`
+and `H <- clip(H + lr * sum(dual), min_horizon, max_horizon)`. It returns the new
+horizon and the next rollout's multipliers, `dual[0]` repeated `round(H)` times.
+The next rollout runs `len(dual)` steps. As in the reference code and
+Algorithm 1, the constraint adds no term to the actor loss. Contact norms above
+`C` make the multipliers positive and lengthen the horizon. The reference
+defaults are `C = 500`, horizon `[8, 64]` starting at 8, and `lr = 5e-4`,
+decayed linearly to `1e-5`. `critic_converged` stops critic training when
+`|mean(diff(last 5 epoch losses))| < 0.2`, checked before the current epoch's
+loss is recorded, with at most 64 epochs. `compute_value_loss` sums the 0.5 MSE
+of both critics. This equals the reference squared error averaged over the two critics.
 
 ## Flow Policy Optimization
 
