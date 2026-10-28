@@ -35,6 +35,7 @@ Gymnasium、MuJoCo 等环境依赖由训练项目管理，核心库无需安装�
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | 离线 expectile 价值回归和优势加权策略拟合 |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | 通过可微仿真器的短视界解析策略梯度、TD(λ) 价值目标 |
 | `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | 按接触刚度自适应视界的 SHAC、双 critic、训练 critic 至收敛 |
+| `SAPO` | [sapo.py](RLAlg/alg/sapo.py) | 最大熵 SHAC：软奖励、自动调节温度、双 critic |
 
 所有损失函数采用同一套调用约定：
 
@@ -375,6 +376,78 @@ horizon, dual = AHAC.update_horizon(
 判断发生在记录当前 epoch 损失之前，最多 64 个 epoch。
 `compute_value_loss` 对两个 critic 的 0.5 倍均方误差求和，等于参考实现中两个 critic 平方误差的平均。
 
+## Soft Analytic Policy Optimization
+
+SAPO（[Xing 等，ICLR 2025](https://arxiv.org/abs/2412.12089)；
+[参考代码](https://github.com/etaoxing/mineral)）是最大熵版本的 SHAC。
+每个奖励都替换为 `r_t + alpha * normalized_entropy_t`，同时用于解析策略回报和 TD(λ) 目标，
+因此熵奖励和奖励一起折扣。温度 `alpha` 朝目标熵自动调整。
+策略是 tanh 压缩的高斯分布，熵用重参数化动作的单样本估计 `-log_prob(a)`。
+两个 critic 取代目标 critic：策略用它们的均值做 bootstrap，价值目标用它们的最小值。
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.sapo import SAPO
+from RLAlg.nn.layers import GaussianHead
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = GaussianHead(3, 3, max_action=1.0, state_dependent_std=True), DoubleCritic()
+log_alpha = nn.Parameter(torch.zeros(()))  # init_alpha = 1
+alpha_optimizer = torch.optim.AdamW([log_alpha], lr=5e-3, betas=(0.7, 0.95))
+N, H, gamma = 4, 32, 0.99
+target_entropy = -0.5 * 3  # -0.5 * action_dim
+
+alpha = log_alpha.exp().item()  # fixed for the rollout
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, rewards, entropies, min_values, mean_values = [], [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    step = policy(state)  # tanh-squashed; step.entropy = -log_prob(step.action)
+    state = state + 0.1 * step.action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    entropies.append(step.entropy)
+    v_min, v_mean = SAPO.compute_next_values(critic, state)  # final obs before reset when done
+    min_values.append(v_min)
+    mean_values.append(v_mean)
+rewards, entropies = torch.stack(rewards), torch.stack(entropies)
+
+policy_result = SAPO.compute_policy_loss(
+    rewards=rewards, entropies=entropies, next_values=torch.stack(mean_values), terminated=terminated,
+    gamma=gamma, alpha=alpha, target_entropy=target_entropy,
+)
+policy_result["loss"].backward()  # then step only the policy optimizer
+
+alpha_result = SAPO.compute_alpha_loss(log_alpha, entropies, target_entropy)
+alpha_optimizer.zero_grad(set_to_none=True)
+alpha_result["loss"].backward()
+alpha_optimizer.step()
+
+targets = SAPO.compute_td_lambda_targets(
+    rewards=rewards, entropies=entropies, next_values=torch.stack(min_values), terminated=terminated,
+    gamma=gamma, lambda_=0.95, alpha=log_alpha.exp().item(), target_entropy=target_entropy,
+)
+value_result = SAPO.compute_value_loss(critic, observations=torch.stack(observations), targets=targets)
+```
+
+`normalize_entropy` 把熵映射为 `(entropy + |target|) / (2 |target|)`，目标熵对应 0。
+`compute_alpha_loss` 在原始熵上计算 `|target| * alpha * mean(entropy - target)`，
+与参考实现一样，`|target|` 因子抵消了归一化。参考实现在 actor 更新之后、计算价值目标之前更新 `alpha`，
+所以价值目标使用新的温度。`compute_value_loss` 是参考实现中各 critic 均方误差的平均，
+不带库中其他价值损失的 `0.5`。参考的 DFlex Ant 默认值为：视界 32、目标熵 `-0.5 * action_dim`、
+初始 `alpha = 1`、betas 为 `(0.7, 0.95)` 的 AdamW，学习率 `2e-3`（actor）、`5e-4`（critic）、
+`5e-3`（alpha），梯度范数裁剪 0.5，固定 16 个 critic epoch、每个 4 个 minibatch，
+log-std 限制在 `[-5, 2]`，LayerNorm + SiLU 网络 `[128, 64, 32]`（actor）和 `[64, 64]`（两个 critic）。
+
 ## Flow Policy Optimization
 
 FPO 约定 `t=0` 为动作、`t=1` 为高斯噪声。网络预测速度
@@ -471,7 +544,7 @@ python -m pytest -q
 ```
 
 测试覆盖算法损失、形状检查、终止掩码、循环网络、replay/HER、归一化、日志，
-FPO 的采样和梯度，以及 SHAC/AHAC 在可微玩具 rollout 上的梯度。
+FPO 的采样和梯度，以及 SHAC/AHAC/SAPO 在可微玩具 rollout 上的梯度。
 
 ## 许可证
 

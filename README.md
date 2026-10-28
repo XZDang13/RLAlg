@@ -39,6 +39,7 @@ Import algorithm classes from their modules, for example
 | `IQL` | [iql.py](RLAlg/alg/iql.py) | Offline expectile value regression and advantage-weighted policy fitting |
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | Short-horizon analytic policy gradients through a differentiable simulator, TD(λ) value targets |
 | `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | SHAC with a contact-adapted horizon, double critic, and critic training until convergence |
+| `SAPO` | [sapo.py](RLAlg/alg/sapo.py) | Maximum-entropy SHAC with soft rewards, an auto-tuned temperature, and a double critic |
 
 All loss functions share one calling convention:
 
@@ -393,6 +394,84 @@ decayed linearly to `1e-5`. `critic_converged` stops critic training when
 loss is recorded, with at most 64 epochs. `compute_value_loss` sums the 0.5 MSE
 of both critics. This equals the reference squared error averaged over the two critics.
 
+## Soft Analytic Policy Optimization
+
+SAPO ([Xing et al., ICLR 2025](https://arxiv.org/abs/2412.12089);
+[reference code](https://github.com/etaoxing/mineral)) is maximum-entropy SHAC.
+Each reward becomes `r_t + alpha * normalized_entropy_t`, both in the analytic
+policy return and in the TD(λ) targets, so the entropy bonus is discounted with
+the rewards. The temperature `alpha` is tuned toward a target entropy. The policy
+is a tanh-squashed Gaussian, whose entropy is the one-sample estimate
+`-log_prob(a)` of the reparameterized action. Two critics replace the target
+critic: the policy bootstraps from their mean, the value targets from their minimum.
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.sapo import SAPO
+from RLAlg.nn.layers import GaussianHead
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = GaussianHead(3, 3, max_action=1.0, state_dependent_std=True), DoubleCritic()
+log_alpha = nn.Parameter(torch.zeros(()))  # init_alpha = 1
+alpha_optimizer = torch.optim.AdamW([log_alpha], lr=5e-3, betas=(0.7, 0.95))
+N, H, gamma = 4, 32, 0.99
+target_entropy = -0.5 * 3  # -0.5 * action_dim
+
+alpha = log_alpha.exp().item()  # fixed for the rollout
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, rewards, entropies, min_values, mean_values = [], [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    step = policy(state)  # tanh-squashed; step.entropy = -log_prob(step.action)
+    state = state + 0.1 * step.action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    entropies.append(step.entropy)
+    v_min, v_mean = SAPO.compute_next_values(critic, state)  # final obs before reset when done
+    min_values.append(v_min)
+    mean_values.append(v_mean)
+rewards, entropies = torch.stack(rewards), torch.stack(entropies)
+
+policy_result = SAPO.compute_policy_loss(
+    rewards=rewards, entropies=entropies, next_values=torch.stack(mean_values), terminated=terminated,
+    gamma=gamma, alpha=alpha, target_entropy=target_entropy,
+)
+policy_result["loss"].backward()  # then step only the policy optimizer
+
+alpha_result = SAPO.compute_alpha_loss(log_alpha, entropies, target_entropy)
+alpha_optimizer.zero_grad(set_to_none=True)
+alpha_result["loss"].backward()
+alpha_optimizer.step()
+
+targets = SAPO.compute_td_lambda_targets(
+    rewards=rewards, entropies=entropies, next_values=torch.stack(min_values), terminated=terminated,
+    gamma=gamma, lambda_=0.95, alpha=log_alpha.exp().item(), target_entropy=target_entropy,
+)
+value_result = SAPO.compute_value_loss(critic, observations=torch.stack(observations), targets=targets)
+```
+
+`normalize_entropy` maps an entropy to `(entropy + |target|) / (2 |target|)`, so
+the target entropy maps to 0. `compute_alpha_loss` is
+`|target| * alpha * mean(entropy - target)` on the raw entropies; the `|target|`
+factor undoes the normalization, as in the reference. The reference updates
+`alpha` after the actor step and before computing the value targets, so the
+targets use the new temperature. `compute_value_loss` is the reference MSE
+averaged over the critics, without the library's usual `0.5`. The reference
+DFlex Ant defaults are horizon 32, target entropy `-0.5 * action_dim`, initial
+`alpha = 1`, AdamW with betas `(0.7, 0.95)` and learning rates `2e-3` (actor),
+`5e-4` (critic), and `5e-3` (alpha), gradient-norm clipping at 0.5, a fixed 16
+critic epochs of 4 minibatches, log-std clamped to `[-5, 2]`, and LayerNorm SiLU
+networks of `[128, 64, 32]` (actor) and `[64, 64]` (two critics).
+
 ## Flow Policy Optimization
 
 FPO uses `t=0` for actions and `t=1` for Gaussian noise. The network predicts
@@ -496,7 +575,7 @@ python -m pytest -q
 
 Tests cover algorithm losses, shape checks, termination masks, recurrent
 networks, replay/HER, normalization, logging, FPO sampling and gradients, and
-SHAC/AHAC gradients through a differentiable toy rollout.
+SHAC/AHAC/SAPO gradients through a differentiable toy rollout.
 
 ## License
 
