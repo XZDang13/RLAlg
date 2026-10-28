@@ -36,6 +36,7 @@ Gymnasium、MuJoCo 等环境依赖由训练项目管理，核心库无需安装�
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | 通过可微仿真器的短视界解析策略梯度、TD(λ) 价值目标 |
 | `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | 按接触刚度自适应视界的 SHAC、双 critic、训练 critic 至收敛 |
 | `SAPO` | [sapo.py](RLAlg/alg/sapo.py) | 最大熵 SHAC：软奖励、自动调节温度、双 critic |
+| `RPO` | [rpo.py](RLAlg/alg/rpo.py) | 在 SAPO 基础上把 BPTT 动作梯度复用于多个带截断与 KL 正则的策略 epoch |
 
 所有损失函数采用同一套调用约定：
 
@@ -448,6 +449,94 @@ value_result = SAPO.compute_value_loss(critic, observations=torch.stack(observat
 `5e-3`（alpha），梯度范数裁剪 0.5，固定 16 个 critic epoch、每个 4 个 minibatch，
 log-std 限制在 `[-5, 2]`，LayerNorm + SiLU 网络 `[128, 64, 32]`（actor）和 `[64, 64]`（两个 critic）。
 
+## Reparameterization Proximal Policy Optimization
+
+RPO（[Zhong 等，ICML 2026](https://arxiv.org/abs/2508.06214)；未公开官方代码）
+把同一批 BPTT 梯度复用于多个策略 epoch。在 SAPO 式 rollout 之后，
+`compute_action_gradients` 一次性计算软短视界损失对每个动作的梯度并缓存。
+每个策略 epoch 用当前策略重新生成存储的动作：`a = mu + sigma * eps_reg`，
+其中 `eps_reg = (a - mu) / sigma` 固定不变（先反解 tanh 压缩），然后把缓存的梯度经由这条路径反传。
+每个样本乘以截断梯度的比率 `rho = pi / pi_old`，比率超出 `[1 - clip_low, 1 + clip_high]` 时置零，
+与梯度符号无关。解析的 `KL(pi_old || pi)` 惩罚让更新贴近行为策略。价值部分与 SAPO 相同。
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.rpo import RPO
+from RLAlg.nn.layers import GaussianHead
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = GaussianHead(3, 3, max_action=1.0, state_dependent_std=True), DoubleCritic()
+policy_optimizer = torch.optim.AdamW(policy.parameters(), lr=5e-4, betas=(0.7, 0.95))
+N, H, M, gamma = 4, 32, 5, 0.99
+alpha, target_entropy = 0.2, -0.5 * 3  # paper: fixed entropy coefficient, target -0.5 * action_dim
+
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, actions, rewards, entropies, mean_values = [], [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    step = policy(state)
+    actions.append(step.action)  # keep the graph: gradients are taken w.r.t. these tensors
+    state = state + 0.1 * step.action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    entropies.append(step.entropy)
+    mean_values.append(RPO.compute_next_values(critic, state)[1])  # final obs before reset when done
+observations, rewards, entropies = torch.stack(observations), torch.stack(rewards), torch.stack(entropies)
+
+mean_values = torch.stack(mean_values)
+cached = RPO.compute_action_gradients(  # one BPTT pass, frees the rollout graph
+    actions=actions, rewards=rewards, entropies=entropies, next_values=mean_values,
+    terminated=terminated, gamma=gamma, alpha=alpha, target_entropy=target_entropy,
+)
+actions = torch.stack(actions).detach()
+with torch.no_grad():  # behavior policy on the stored actions
+    behavior = policy(observations, actions)
+log_probs_hat = behavior.log_prob
+means_hat, stds_hat = behavior.pi.base_dist.loc, behavior.pi.base_dist.scale
+
+for epoch in range(M):  # epoch 0 is on-policy, later epochs reuse the cached gradients
+    policy_result = RPO.compute_policy_loss(
+        policy, observations=observations, actions=actions, action_gradients=cached["action_gradients"],
+        log_probs_hat=log_probs_hat, means_hat=means_hat, stds_hat=stds_hat,
+        clip_low=0.8, clip_high=1.0, kl_coef=0.25,
+    )
+    policy_optimizer.zero_grad(set_to_none=True)
+    policy_result["loss"].backward()
+    nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+    policy_optimizer.step()
+
+targets = RPO.compute_td_lambda_targets(  # the paper uses the critics' mean, SAPO the minimum
+    rewards=rewards, entropies=entropies, next_values=mean_values, terminated=terminated,
+    gamma=gamma, lambda_=0.95, alpha=alpha, target_entropy=target_entropy,
+)
+value_result = RPO.compute_value_loss(critic, observations=observations, targets=targets)
+```
+
+第一个 epoch 中 `rho = 1` 且 KL 梯度为零，策略梯度恰好等于经由动作的 SHAC/SAPO BPTT 梯度。
+代理目标取求和而非平均，因为缓存的梯度已含 SAPO 的 `1 / (H * N)`；划分 minibatch 时需相应缩放。
+如上例在存储的动作上重新计算 `log_probs_hat`，使第一次的比率恰为 1。
+论文默认值为：视界 32、`M = 5` 个策略 epoch 和 16 个 critic epoch、`clip_low = 0.8`、`clip_high = 1.0`、
+目标熵 `-0.5 * action_dim`、betas 为 `(0.7, 0.95)` 的 AdamW，两个网络学习率均为 `5e-4` 并按指数衰减，
+两个 LayerNorm + SiLU `[400, 200, 100]` critic，以及按任务设定的系数，例如 DFlex Ant 的
+`kl_coef = 0.25`、熵系数 `0.2`。
+
+论文没有公开代码，只说明 RPO 基于 SAPO 仓库实现，因此部分细节是推断的：
+- 论文的熵项是 SAPO 的软奖励（附录 C.2），所以其熵系数作为固定的 `alpha` 传入。
+  `compute_policy_loss` 另有可选的逐 epoch 熵奖励 `entropy_coef`（公式 13），默认为 0。
+  若想用 SAPO 的自动温度，可使用继承的 `compute_alpha_loss`。
+- 论文说价值目标使用 critic 的均值，而 SAPO 参考实现用最小值；`compute_next_values` 两者都返回。
+- 省略了 `lambda_surr`，它只是缩放代理目标。
+- 按论文表 2 的列对齐，RPO 的梯度范数裁剪为 0.5（1.0 属于 GI-PPO），且没有温度学习率，所以熵系数固定不变。
+
 ## Flow Policy Optimization
 
 FPO 约定 `t=0` 为动作、`t=1` 为高斯噪声。网络预测速度
@@ -544,7 +633,7 @@ python -m pytest -q
 ```
 
 测试覆盖算法损失、形状检查、终止掩码、循环网络、replay/HER、归一化、日志，
-FPO 的采样和梯度，以及 SHAC/AHAC/SAPO 在可微玩具 rollout 上的梯度。
+FPO 的采样和梯度，以及 SHAC/AHAC/SAPO/RPO 在可微玩具 rollout 上的梯度。
 
 ## 许可证
 

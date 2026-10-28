@@ -40,6 +40,7 @@ Import algorithm classes from their modules, for example
 | `SHAC` | [shac.py](RLAlg/alg/shac.py) | Short-horizon analytic policy gradients through a differentiable simulator, TD(λ) value targets |
 | `AHAC` | [ahac.py](RLAlg/alg/ahac.py) | SHAC with a contact-adapted horizon, double critic, and critic training until convergence |
 | `SAPO` | [sapo.py](RLAlg/alg/sapo.py) | Maximum-entropy SHAC with soft rewards, an auto-tuned temperature, and a double critic |
+| `RPO` | [rpo.py](RLAlg/alg/rpo.py) | SAPO with BPTT action gradients reused over several clipped, KL-regularized policy epochs |
 
 All loss functions share one calling convention:
 
@@ -472,6 +473,106 @@ DFlex Ant defaults are horizon 32, target entropy `-0.5 * action_dim`, initial
 critic epochs of 4 minibatches, log-std clamped to `[-5, 2]`, and LayerNorm SiLU
 networks of `[128, 64, 32]` (actor) and `[64, 64]` (two critics).
 
+## Reparameterization Proximal Policy Optimization
+
+RPO ([Zhong et al., ICML 2026](https://arxiv.org/abs/2508.06214); no official
+code released) reuses one batch of BPTT gradients for several policy epochs.
+After a SAPO-style rollout, `compute_action_gradients` takes the gradient of the
+soft short-horizon loss with respect to every action once and caches it. Each
+policy epoch regenerates the stored actions under the current policy,
+`a = mu + sigma * eps_reg` with `eps_reg = (a - mu) / sigma` held fixed (tanh
+squashing is inverted first), and backpropagates the cached gradients through
+this path. Each sample is weighted by the detached ratio `rho = pi / pi_old`,
+and zeroed outside `[1 - clip_low, 1 + clip_high]` whatever the gradient's sign.
+An analytic `KL(pi_old || pi)` penalty keeps the update close to the behavior
+policy. The value side is SAPO's.
+
+```python
+import torch
+import torch.nn as nn
+from RLAlg.alg.rpo import RPO
+from RLAlg.nn.layers import GaussianHead
+from RLAlg.nn.steps import ValueStep
+
+class DoubleCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.v1, self.v2 = nn.Linear(3, 1), nn.Linear(3, 1)
+
+    def forward(self, obs):
+        return ValueStep(value=self.v1(obs).squeeze(-1)), ValueStep(value=self.v2(obs).squeeze(-1))
+
+policy, critic = GaussianHead(3, 3, max_action=1.0, state_dependent_std=True), DoubleCritic()
+policy_optimizer = torch.optim.AdamW(policy.parameters(), lr=5e-4, betas=(0.7, 0.95))
+N, H, M, gamma = 4, 32, 5, 0.99
+alpha, target_entropy = 0.2, -0.5 * 3  # paper: fixed entropy coefficient, target -0.5 * action_dim
+
+state = torch.randn(N, 3)  # usually env.reset(); must stay in the autograd graph
+observations, actions, rewards, entropies, mean_values = [], [], [], [], []
+terminated = torch.zeros(H, N, dtype=torch.bool)
+for t in range(H):
+    observations.append(state.detach())
+    step = policy(state)
+    actions.append(step.action)  # keep the graph: gradients are taken w.r.t. these tensors
+    state = state + 0.1 * step.action  # differentiable env.step
+    rewards.append(-(state ** 2).sum(-1))
+    entropies.append(step.entropy)
+    mean_values.append(RPO.compute_next_values(critic, state)[1])  # final obs before reset when done
+observations, rewards, entropies = torch.stack(observations), torch.stack(rewards), torch.stack(entropies)
+
+mean_values = torch.stack(mean_values)
+cached = RPO.compute_action_gradients(  # one BPTT pass, frees the rollout graph
+    actions=actions, rewards=rewards, entropies=entropies, next_values=mean_values,
+    terminated=terminated, gamma=gamma, alpha=alpha, target_entropy=target_entropy,
+)
+actions = torch.stack(actions).detach()
+with torch.no_grad():  # behavior policy on the stored actions
+    behavior = policy(observations, actions)
+log_probs_hat = behavior.log_prob
+means_hat, stds_hat = behavior.pi.base_dist.loc, behavior.pi.base_dist.scale
+
+for epoch in range(M):  # epoch 0 is on-policy, later epochs reuse the cached gradients
+    policy_result = RPO.compute_policy_loss(
+        policy, observations=observations, actions=actions, action_gradients=cached["action_gradients"],
+        log_probs_hat=log_probs_hat, means_hat=means_hat, stds_hat=stds_hat,
+        clip_low=0.8, clip_high=1.0, kl_coef=0.25,
+    )
+    policy_optimizer.zero_grad(set_to_none=True)
+    policy_result["loss"].backward()
+    nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+    policy_optimizer.step()
+
+targets = RPO.compute_td_lambda_targets(  # the paper uses the critics' mean, SAPO the minimum
+    rewards=rewards, entropies=entropies, next_values=mean_values, terminated=terminated,
+    gamma=gamma, lambda_=0.95, alpha=alpha, target_entropy=target_entropy,
+)
+value_result = RPO.compute_value_loss(critic, observations=observations, targets=targets)
+```
+
+In the first epoch `rho = 1` and the KL gradient is zero, so the policy gradient
+is exactly the SHAC/SAPO BPTT gradient through the actions. The surrogate is
+summed, not averaged, because the cached gradients already carry SAPO's
+`1 / (H * N)`; when splitting the batch into minibatches, rescale it. Recompute
+`log_probs_hat` on the stored actions, as above, so the first ratio is exactly 1.
+The paper's defaults are horizon 32, `M = 5` policy and 16 critic epochs,
+`clip_low = 0.8`, `clip_high = 1.0`, target entropy `-0.5 * action_dim`,
+AdamW `(0.7, 0.95)` with learning rate `5e-4` for both networks on an
+exponential schedule, two LayerNorm SiLU `[400, 200, 100]` critics, and
+per-task coefficients, for example DFlex Ant `kl_coef = 0.25`, entropy `0.2`.
+
+The paper releases no code and states RPO is built on the SAPO repository, so
+some details are inferred:
+- The paper's entropy term is SAPO's soft reward (its Appendix C.2), so its
+  entropy coefficient is passed as a fixed `alpha`. `compute_policy_loss` also
+  takes an optional per-epoch `entropy_coef` bonus (equation 13), which defaults to 0.
+  `compute_alpha_loss` is inherited if you prefer SAPO's tuned temperature.
+- The paper says the value targets use the critics' mean. SAPO's reference uses
+  the minimum. `compute_next_values` returns both.
+- `lambda_surr` is left out, since it only rescales the surrogate.
+- By the column alignment of the paper's Table 2, RPO clips gradient norms at
+  0.5 (the 1.0 is GI-PPO's) and uses no temperature learning rate, so the
+  entropy coefficient stays fixed.
+
 ## Flow Policy Optimization
 
 FPO uses `t=0` for actions and `t=1` for Gaussian noise. The network predicts
@@ -575,7 +676,7 @@ python -m pytest -q
 
 Tests cover algorithm losses, shape checks, termination masks, recurrent
 networks, replay/HER, normalization, logging, FPO sampling and gradients, and
-SHAC/AHAC/SAPO gradients through a differentiable toy rollout.
+SHAC/AHAC/SAPO/RPO gradients through a differentiable toy rollout.
 
 ## License
 
